@@ -114,7 +114,7 @@ class MLXDecisionPredictor:
 
         # Initialize pre-allocated in-place StaticKVCachePool if prefix sharing enabled
         if self.enable_prefix_sharing:
-            from fast_decision_engine import StaticKVCachePool
+            from cross_question_sharing_engine import StaticKVCachePool
             self.cache_pool = StaticKVCachePool(self.model.backbone.model)
         else:
             self.cache_pool = None
@@ -126,9 +126,9 @@ class MLXDecisionPredictor:
 
         self.inference_calls += 1
 
-        # High-performance path: Prefix Sharing with in-place static memory pool & compiled heads
+        # Highest-performance path: Cross-Question Hierarchical State Sharing Engine
         if self.enable_prefix_sharing:
-            from fast_decision_engine import evaluate_state_questions_fast
+            from cross_question_sharing_engine import evaluate_state_cross_question_sharing
             outputs = {}
             total_tokens = 0
             candidate_paths = 0
@@ -136,7 +136,7 @@ class MLXDecisionPredictor:
 
             for st in states:
                 st_id = st["id"]
-                answers, tok_cnt = evaluate_state_questions_fast(
+                answers, tok_cnt = evaluate_state_cross_question_sharing(
                     self.model,
                     self.tokenizer,
                     self.cache_pool,
@@ -161,13 +161,13 @@ class MLXDecisionPredictor:
                 },
                 "temperature": {"value": float(temperature)},
                 "execution": {
-                    "engine": "mlx-fast-prefix-pool",
+                    "engine": "mlx-cross-question-tree-sharing",
                     "device": str(mx.default_device()),
                     "states": len(states),
                     "questions": total_questions,
                     "candidate_paths": candidate_paths,
                     "total_input_tokens": total_tokens,
-                    "forward_passes": total_questions,
+                    "forward_passes": total_questions + len(states),
                     "autoregressive_decode_steps": 0,
                     "inference_call_index": self.inference_calls,
                 },
