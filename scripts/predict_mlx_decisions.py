@@ -47,6 +47,15 @@ def load_mlx_decision_model(checkpoint_dir: str):
     model_args = qwen3.ModelArgs.from_dict(cfg)
     backbone = qwen3.Model(model_args)
 
+    # If checkpoint is quantized, apply quantize structure before loading weights
+    quant_cfg = cfg.get("quantization") or run_config.get("quantization")
+    if quant_cfg:
+        def predicate(path, module):
+            if "heads" in path or isinstance(module, (nn.Embedding, nn.RMSNorm, nn.LayerNorm)):
+                return False
+            return isinstance(module, nn.Linear)
+        nn.quantize(backbone, group_size=quant_cfg["group_size"], bits=quant_cfg["bits"], class_predicate=predicate)
+
     model = MLXDecisionModel(backbone, set_head=run_config.get("set_head", "none"))
 
     # Check if checkpoint uses DeepDecisionHeads (2-layer MLP)
@@ -126,6 +135,10 @@ class MLXDecisionPredictor:
                 outputs[example["state_id"]]["answers"][example["qid"]] = answer_from_probabilities(
                     example, probs
                 )
+
+        # Clear Metal memory cache immediately after forward evaluation to release GPU buffer
+        if hasattr(mx, "metal") and hasattr(mx.metal, "clear_cache"):
+            mx.metal.clear_cache()
 
         total_tokens = sum(len(leaf) for ex in examples for leaf in ex["leaf_tokens"])
         return {
