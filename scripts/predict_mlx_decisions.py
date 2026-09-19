@@ -99,9 +99,9 @@ def load_mlx_decision_model(checkpoint_dir: str):
 
 
 class MLXDecisionPredictor:
-    """Persistent inference predictor on Apple Silicon using MLX."""
+    """Persistent inference predictor on Apple Silicon using MLX with optional Prefix Sharing."""
 
-    def __init__(self, checkpoint_dir: str, max_length: Optional[int] = None):
+    def __init__(self, checkpoint_dir: str, max_length: Optional[int] = None, enable_prefix_sharing: bool = True):
         model, tokenizer, root, run_config = load_mlx_decision_model(checkpoint_dir)
         limit = run_config.get("max_length", 512) if max_length is None else max_length
         self.model = model
@@ -109,6 +109,7 @@ class MLXDecisionPredictor:
         self.root = root
         self.run_config = run_config
         self.limit = limit
+        self.enable_prefix_sharing = enable_prefix_sharing
         self.inference_calls = 0
 
     def predict(self, payload: dict, batch_questions: int = 0, temperature: float = 1.0) -> dict:
@@ -116,9 +117,61 @@ class MLXDecisionPredictor:
         if not isinstance(temperature, (int, float)) or not math.isfinite(temperature) or temperature <= 0:
             raise ValueError("temperature 必须为有限正数")
 
+        self.inference_calls += 1
+
+        # High-performance path: Prefix Sharing (executes State prefill once per question, parallel branch forking)
+        if self.enable_prefix_sharing:
+            from prefix_sharing_engine import evaluate_state_questions_prefix_sharing
+            outputs = {}
+            total_tokens = 0
+            candidate_paths = 0
+            total_questions = 0
+
+            for st in states:
+                st_id = st["id"]
+                answers, tok_cnt = evaluate_state_questions_prefix_sharing(
+                    self.model,
+                    self.tokenizer,
+                    state_id=st_id,
+                    state_val=st["state"],
+                    questions_dict=st["questions"],
+                    temperature=temperature,
+                    max_length=self.limit,
+                )
+                outputs[st_id] = {"id": st_id, "answers": answers}
+                total_tokens += tok_cnt
+                total_questions += len(st["questions"])
+                for q in st["questions"].values():
+                    candidate_paths += 1 if q["type"] == "boolean" else len(q["criteria"])
+
+            if hasattr(mx, "metal") and hasattr(mx.metal, "clear_cache"):
+                mx.metal.clear_cache()
+
+            return {
+                "schema_version": "openjev-mlx-inference-v1",
+                "checkpoint": {
+                    "directory": str(self.root),
+                    "base_model": self.run_config.get("model"),
+                    "set_head": self.run_config.get("set_head", "none"),
+                },
+                "temperature": {"value": float(temperature)},
+                "execution": {
+                    "engine": "mlx-prefix-sharing",
+                    "device": str(mx.default_device()),
+                    "states": len(states),
+                    "questions": total_questions,
+                    "candidate_paths": candidate_paths,
+                    "total_input_tokens": total_tokens,
+                    "forward_passes": total_questions,
+                    "autoregressive_decode_steps": 0,
+                    "inference_call_index": self.inference_calls,
+                },
+                "states": list(outputs.values()),
+            }
+
+        # Legacy concatenated batch path
         examples = prepare_examples(payload, self.tokenizer, self.limit)
         batches = complete_question_batches(examples, batch_questions)
-        self.inference_calls += 1
 
         outputs = {state["id"]: {"id": state["id"], "answers": {}} for state in states}
 
@@ -136,7 +189,6 @@ class MLXDecisionPredictor:
                     example, probs
                 )
 
-        # Clear Metal memory cache immediately after forward evaluation to release GPU buffer
         if hasattr(mx, "metal") and hasattr(mx.metal, "clear_cache"):
             mx.metal.clear_cache()
 
