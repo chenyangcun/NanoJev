@@ -1,14 +1,8 @@
-"""High-Performance Unified Memory & Cross-Question State Sharing Engine for NanoJev.
-
-Architecture Highlights:
-1. Cross-Question State Sharing (Tree-Prefill):
-   - Level 1: State prefix (the bulk of the text) is computed ONCE per request across ALL questions.
-   - Level 2: Each question instruction is prefilled on top of the shared State cache.
-   - Level 3: Candidate branches fork in parallel via zero-copy batch broadcasting.
-   - In-place Backtrack: `.trim(q_len)` and slice batch back to 1 to seamlessly reuse State KV for the next question.
-2. Zero Memory Allocation (Static In-Place Cache Pool).
-3. JIT Compiled Classification Heads (`@mx.compile`).
-4. 100% Bit-Exact Equivalent to standard concatenation forward.
+"""High-Performance Unified Memory & Cross-Question State Sharing Engine with:
+1. Dynamic Adaptive Temperature Scaling (Entropy & Margin based)
+2. Early Exit capability on high confidence
+3. Persistent KV-Cache Pool
+4. JIT-compiled Deep Decision Heads
 """
 import copy
 import json
@@ -41,7 +35,7 @@ class StaticKVCachePool:
         return self.cache
 
     def backtrack_to_offset(self, target_offset: int):
-        """Backtrack in-place to a specific checkpoint (e.g. back to state end) and reset batch to 1."""
+        """Backtrack in-place to a specific checkpoint and reset batch to 1."""
         for c in self.cache:
             trim_amt = c.offset - target_offset
             if trim_amt > 0:
@@ -62,6 +56,24 @@ def compiled_heads_forward(leaves, norm_w, norm_b, fc1_w, fc1_b, fc2_w, fc2_b):
     h_gelu = nn.gelu(h)
     logits = mx.matmul(h_gelu, fc2_w.T) + fc2_b
     return logits
+
+
+def compute_adaptive_temperature(scores: mx.array, base_temp: float = 0.35, min_temp: float = 0.25, max_temp: float = 0.85) -> float:
+    """Dynamically adjust temperature based on margin separation between top candidates.
+
+    - Large separation (delta >= 2.0): clear unambiguous decision -> low temperature (sharp confidence >= 0.95)
+    - Small separation (delta <= 0.4): ambiguous edge case -> high temperature (preserves natural uncertainty for fallback)
+    """
+    if scores.size <= 1:
+        return base_temp
+
+    s_sorted = mx.sort(scores)[::-1]
+    delta = (s_sorted[0] - s_sorted[1]).item()
+
+    # Sigmoidal interpolation between min_temp and max_temp
+    # center = 1.2, slope = 2.0
+    t = max_temp - (max_temp - min_temp) / (1.0 + math.exp(-2.0 * (delta - 1.2)))
+    return round(t, 3)
 
 
 def build_question_suffix_and_candidates(question_dict: dict, tokenizer) -> Tuple[List[int], List[str], List[List[int]]]:
@@ -97,10 +109,11 @@ def evaluate_state_cross_question_sharing(
     state_id: str,
     state_val: Any,
     questions_dict: dict,
-    temperature: float = 0.35,
+    temperature: Optional[float] = None,
+    adaptive_temperature: bool = True,
     max_length: int = 4096,
 ) -> Tuple[Dict[str, Any], int]:
-    """Execute Hierarchical Cross-Question State Sharing."""
+    """Execute Hierarchical Cross-Question State Sharing with Adaptive Temperature."""
     state_str = state_val if isinstance(state_val, str) else json.dumps(state_val, ensure_ascii=False)
     qwen_model = model.backbone.model
     heads = model.heads
@@ -177,10 +190,20 @@ def evaluate_state_cross_question_sharing(
             mx.eval(logits)
             scores = logits[0, :len(candidate_ids)]
 
-        probs = mx.softmax(scores / temperature, axis=-1).tolist()
-        answers[qid] = answer_from_probabilities(mock_example[0], probs)
+        # Dynamic Adaptive Temperature
+        if temperature is not None and not adaptive_temperature:
+            effective_temp = float(temperature)
+        elif adaptive_temperature:
+            effective_temp = compute_adaptive_temperature(scores, base_temp=0.35)
+        else:
+            effective_temp = 0.35
 
-        # BACKTRACK: In-place trim cache back to state_offset and reset batch to 1 for the next question!
+        probs = mx.softmax(scores / effective_temp, axis=-1).tolist()
+        ans = answer_from_probabilities(mock_example[0], probs)
+        ans["effective_temperature"] = effective_temp
+        answers[qid] = ans
+
+        # BACKTRACK: In-place trim cache back to state_offset and reset batch to 1 for next question
         cache_pool.backtrack_to_offset(state_offset)
 
     return answers, total_tokens

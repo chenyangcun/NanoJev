@@ -16,12 +16,17 @@ from predict_mlx_decisions import MLXDecisionPredictor
 from predict_toy_decisions import reject_nonfinite, unique_object, validate_request
 
 
-def server_class(engine, web_root, default_temperature=0.45):
+def server_class(engine, web_root, default_temperature=0.35):
     class Handler(BaseHTTPRequestHandler):
+        # Enable HTTP/1.1 persistent connections (Keep-Alive)
+        protocol_version = "HTTP/1.1"
+
         def send(self, code, content, mime="application/json; charset=utf-8"):
             self.send_response(code)
             self.send_header("Content-Type", mime)
             self.send_header("Content-Length", str(len(content)))
+            self.send_header("Connection", "keep-alive")
+            self.send_header("Keep-Alive", "timeout=120, max=1000")
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(content)
