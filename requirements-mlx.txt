@@ -1,0 +1,8 @@
+# Requirements for Apple Silicon macOS (MLX Native)
+
+# MLX and LLM backend for Apple Silicon (Metal GPU)
+mlx>=0.32.0
+mlx-lm>=0.31.0
+safetensors>=0.8.0
+transformers>=5.17.0
+numpy>=2.0.0

@@ -1,0 +1,111 @@
+#!/bin/zsh
+
+set -u
+
+LABEL="com.chenyc.nanojev"
+DOMAIN="gui/$(id -u)"
+SERVICE="$DOMAIN/$LABEL"
+PLIST="/Users/chenyc/Library/LaunchAgents/$LABEL.plist"
+HEALTH_URL="http://127.0.0.1:8769/api/health"
+LOG_FILE="/Users/chenyc/Library/Logs/NanoJev/serve.log"
+
+is_loaded() {
+  launchctl print "$SERVICE" >/dev/null 2>&1
+}
+
+is_healthy() {
+  curl --noproxy '*' --fail --silent --max-time 2 "$HEALTH_URL" >/dev/null 2>&1
+}
+
+wait_ready() {
+  local attempt
+  for attempt in {1..30}; do
+    if is_healthy; then
+      echo "NanoJev 服务已启动：http://127.0.0.1:8769"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "NanoJev 服务启动超时，请运行：nanojev-service logs" >&2
+  return 1
+}
+
+start_service() {
+  if is_loaded; then
+    if is_healthy; then
+      echo "NanoJev 服务已经在运行。"
+      return 0
+    fi
+    launchctl kickstart -k "$SERVICE"
+  else
+    if [[ ! -f "$PLIST" ]]; then
+      echo "找不到 LaunchAgent：$PLIST" >&2
+      return 1
+    fi
+    launchctl bootstrap "$DOMAIN" "$PLIST"
+    launchctl enable "$SERVICE" 2>/dev/null || true
+  fi
+  wait_ready
+}
+
+stop_service() {
+  if ! is_loaded; then
+    echo "NanoJev 服务已经停止。"
+    return 0
+  fi
+  launchctl bootout "$SERVICE"
+  local attempt
+  for attempt in {1..15}; do
+    if ! is_loaded && ! is_healthy; then
+      echo "NanoJev 服务已停止。"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "NanoJev 服务停止超时。" >&2
+  return 1
+}
+
+status_service() {
+  if is_loaded; then
+    echo "LaunchAgent：已加载"
+    launchctl print "$SERVICE" | grep -E '^\s*(state|pid|last exit code) = ' || true
+  else
+    echo "LaunchAgent：未加载"
+  fi
+  if is_healthy; then
+    echo "HTTP：正常"
+    curl --noproxy '*' --silent --max-time 2 "$HEALTH_URL"
+    echo
+    return 0
+  fi
+  echo "HTTP：不可用"
+  return 1
+}
+
+case "${1:-status}" in
+  start)
+    start_service
+    ;;
+  stop)
+    stop_service
+    ;;
+  restart)
+    if is_loaded; then
+      launchctl kickstart -k "$SERVICE"
+      wait_ready
+    else
+      start_service
+    fi
+    ;;
+  status)
+    status_service
+    ;;
+  logs)
+    tail -n 100 -f "$LOG_FILE"
+    ;;
+  *)
+    echo "用法：nanojev-service {start|stop|restart|status|logs}" >&2
+    exit 2
+    ;;
+esac
