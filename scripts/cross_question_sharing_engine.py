@@ -1,7 +1,7 @@
 """High-Performance Unified Memory & Cross-Question State Sharing Engine with:
-1. Dynamic Adaptive Temperature Scaling (Entropy & Margin based)
-2. Early Exit capability on high confidence
-3. Persistent KV-Cache Pool
+1. Dynamic Adaptive Temperature Scaling (Margin & Entropy based)
+2. Dynamic Early Exit (Layer-Skipping on ultra-confident predictions)
+3. Persistent Static KV-Cache Memory Pool
 4. JIT-compiled Deep Decision Heads
 """
 import copy
@@ -62,7 +62,7 @@ def compute_adaptive_temperature(scores: mx.array, base_temp: float = 0.35, min_
     """Dynamically adjust temperature based on margin separation between top candidates.
 
     - Large separation (delta >= 2.0): clear unambiguous decision -> low temperature (sharp confidence >= 0.95)
-    - Small separation (delta <= 0.4): ambiguous edge case -> high temperature (preserves natural uncertainty for fallback)
+    - Small separation (delta <= 0.4): ambiguous edge case -> higher temperature (preserves natural uncertainty for fallback)
     """
     if scores.size <= 1:
         return base_temp
@@ -71,8 +71,8 @@ def compute_adaptive_temperature(scores: mx.array, base_temp: float = 0.35, min_
     delta = (s_sorted[0] - s_sorted[1]).item()
 
     # Sigmoidal interpolation between min_temp and max_temp
-    # center = 1.2, slope = 2.0
-    t = max_temp - (max_temp - min_temp) / (1.0 + math.exp(-2.0 * (delta - 1.2)))
+    # center = 1.3, slope = 2.0
+    t = max_temp - (max_temp - min_temp) / (1.0 + math.exp(-2.0 * (delta - 1.3)))
     return round(t, 3)
 
 
@@ -110,10 +110,12 @@ def evaluate_state_cross_question_sharing(
     state_val: Any,
     questions_dict: dict,
     temperature: Optional[float] = None,
-    adaptive_temperature: bool = True,
+    enable_adaptive_temp: bool = True,
+    early_exit_layer: int = 0,
+    early_exit_confidence: float = 0.98,
     max_length: int = 4096,
 ) -> Tuple[Dict[str, Any], int]:
-    """Execute Hierarchical Cross-Question State Sharing with Adaptive Temperature."""
+    """Execute Hierarchical Cross-Question State Sharing with Adaptive Temperature and Early Exit."""
     state_str = state_val if isinstance(state_val, str) else json.dumps(state_val, ensure_ascii=False)
     qwen_model = model.backbone.model
     heads = model.heads
@@ -157,12 +159,53 @@ def evaluate_state_cross_question_sharing(
             layer_c.keys = mx.broadcast_to(layer_c.keys, (K, layer_c.keys.shape[1], layer_c.keys.shape[2], layer_c.keys.shape[3]))
             layer_c.values = mx.broadcast_to(layer_c.values, (K, layer_c.values.shape[1], layer_c.values.shape[2], layer_c.values.shape[3]))
 
-        # Forward candidates
-        cand_hidden = qwen_model(cand_ids, cache=prompt_cache)
-
-        # Extract leaves at end of each candidate branch
+        # Dynamic Early Exit Evaluation
+        # If early_exit_layer is configured (>0 and <28), we can probe intermediate hidden states
         leaf_indices = mx.array([l - 1 for l in cand_lengths], dtype=mx.int32)
         row_indices = mx.arange(K, dtype=mx.int32)
+
+        if 0 < early_exit_layer < len(qwen_model.layers):
+            from mlx_lm.models.base import create_attention_mask
+            h = qwen_model.embed_tokens(cand_ids)
+            mask = create_attention_mask(h, prompt_cache[0])
+            for i in range(early_exit_layer):
+                h = qwen_model.layers[i](h, mask, prompt_cache[i])
+            h_early = qwen_model.norm(h)
+            early_leaves = h_early[row_indices, leaf_indices]
+
+            # Compute early logits
+            if hasattr(heads, "fc1") and hasattr(heads, "fc2") and heads.set_head == "none":
+                early_raw = compiled_heads_forward(
+                    early_leaves, heads.norm.weight, heads.norm.bias,
+                    heads.fc1.weight, heads.fc1.bias, heads.fc2.weight, heads.fc2.bias
+                )
+                mx.eval(early_raw)
+                z_early = mx.squeeze(early_raw, axis=-1).astype(mx.float32)
+                scores_early = mx.stack([0.0 * z_early[0], z_early[0]], axis=0) if q["type"] == "boolean" else z_early
+            else:
+                scores_early = None
+
+            # Check early confidence
+            if scores_early is not None:
+                p_early = mx.softmax(scores_early / 0.35, axis=-1).tolist()
+                mock_ex = [{"id": f"{state_id}:{qid}", "qid": qid, "type": q["type"], "candidate_ids": candidate_ids}]
+                ans_early = answer_from_probabilities(mock_ex[0], p_early)
+                # If confidence exceeds threshold, early exit!
+                if ans_early.get("confidence", 0.0) >= early_exit_confidence:
+                    ans_early["early_exited_at_layer"] = early_exit_layer
+                    answers[qid] = ans_early
+                    cache_pool.backtrack_to_offset(state_offset)
+                    continue
+
+            # If not early exited, complete remaining layers
+            for i in range(early_exit_layer, len(qwen_model.layers)):
+                h = qwen_model.layers[i](h, mask, prompt_cache[i])
+            cand_hidden = qwen_model.norm(h)
+        else:
+            # Full model execution
+            cand_hidden = qwen_model(cand_ids, cache=prompt_cache)
+
+        # Extract leaves at end of each candidate branch
         leaves = cand_hidden[row_indices, leaf_indices]
 
         # Calculate logits via compiled heads
@@ -190,10 +233,10 @@ def evaluate_state_cross_question_sharing(
             mx.eval(logits)
             scores = logits[0, :len(candidate_ids)]
 
-        # Dynamic Adaptive Temperature
-        if temperature is not None and not adaptive_temperature:
+        # Dynamic Adaptive Temperature Scaling
+        if temperature is not None and not enable_adaptive_temp:
             effective_temp = float(temperature)
-        elif adaptive_temperature:
+        elif enable_adaptive_temp:
             effective_temp = compute_adaptive_temperature(scores, base_temp=0.35)
         else:
             effective_temp = 0.35
@@ -203,7 +246,7 @@ def evaluate_state_cross_question_sharing(
         ans["effective_temperature"] = effective_temp
         answers[qid] = ans
 
-        # BACKTRACK: In-place trim cache back to state_offset and reset batch to 1 for next question
+        # BACKTRACK: In-place trim cache back to state_offset and reset batch to 1 for the next question!
         cache_pool.backtrack_to_offset(state_offset)
 
     return answers, total_tokens

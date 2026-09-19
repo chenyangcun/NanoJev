@@ -101,7 +101,15 @@ def load_mlx_decision_model(checkpoint_dir: str):
 class MLXDecisionPredictor:
     """Persistent inference predictor on Apple Silicon using MLX with optional Prefix Sharing."""
 
-    def __init__(self, checkpoint_dir: str, max_length: Optional[int] = None, enable_prefix_sharing: bool = True):
+    def __init__(
+        self,
+        checkpoint_dir: str,
+        max_length: Optional[int] = None,
+        enable_prefix_sharing: bool = True,
+        enable_adaptive_temp: bool = True,
+        early_exit_layer: int = 0,
+        early_exit_confidence: float = 0.98,
+    ):
         model, tokenizer, root, run_config = load_mlx_decision_model(checkpoint_dir)
         limit = run_config.get("max_length", 512) if max_length is None else max_length
         self.model = model
@@ -110,6 +118,9 @@ class MLXDecisionPredictor:
         self.run_config = run_config
         self.limit = limit
         self.enable_prefix_sharing = enable_prefix_sharing
+        self.enable_adaptive_temp = enable_adaptive_temp
+        self.early_exit_layer = early_exit_layer
+        self.early_exit_confidence = early_exit_confidence
         self.inference_calls = 0
 
         # Initialize pre-allocated in-place StaticKVCachePool if prefix sharing enabled
@@ -144,6 +155,9 @@ class MLXDecisionPredictor:
                     state_val=st["state"],
                     questions_dict=st["questions"],
                     temperature=temperature,
+                    enable_adaptive_temp=self.enable_adaptive_temp,
+                    early_exit_layer=self.early_exit_layer,
+                    early_exit_confidence=self.early_exit_confidence,
                     max_length=self.limit,
                 )
                 outputs[st_id] = {"id": st_id, "answers": answers}
@@ -159,7 +173,7 @@ class MLXDecisionPredictor:
                     "base_model": self.run_config.get("model"),
                     "set_head": self.run_config.get("set_head", "none"),
                 },
-                "temperature": {"value": float(temperature)},
+                "temperature": {"value": float(temperature), "adaptive": self.enable_adaptive_temp},
                 "execution": {
                     "engine": "mlx-cross-question-tree-sharing",
                     "device": str(mx.default_device()),
@@ -168,6 +182,7 @@ class MLXDecisionPredictor:
                     "candidate_paths": candidate_paths,
                     "total_input_tokens": total_tokens,
                     "forward_passes": total_questions + len(states),
+                    "early_exit_layer": self.early_exit_layer,
                     "autoregressive_decode_steps": 0,
                     "inference_call_index": self.inference_calls,
                 },
