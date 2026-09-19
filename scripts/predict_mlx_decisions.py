@@ -112,6 +112,13 @@ class MLXDecisionPredictor:
         self.enable_prefix_sharing = enable_prefix_sharing
         self.inference_calls = 0
 
+        # Initialize pre-allocated in-place StaticKVCachePool if prefix sharing enabled
+        if self.enable_prefix_sharing:
+            from fast_decision_engine import StaticKVCachePool
+            self.cache_pool = StaticKVCachePool(self.model.backbone.model)
+        else:
+            self.cache_pool = None
+
     def predict(self, payload: dict, batch_questions: int = 0, temperature: float = 1.0) -> dict:
         states = validate_request(payload)
         if not isinstance(temperature, (int, float)) or not math.isfinite(temperature) or temperature <= 0:
@@ -119,9 +126,9 @@ class MLXDecisionPredictor:
 
         self.inference_calls += 1
 
-        # High-performance path: Prefix Sharing (executes State prefill once per question, parallel branch forking)
+        # High-performance path: Prefix Sharing with in-place static memory pool & compiled heads
         if self.enable_prefix_sharing:
-            from prefix_sharing_engine import evaluate_state_questions_prefix_sharing
+            from fast_decision_engine import evaluate_state_questions_fast
             outputs = {}
             total_tokens = 0
             candidate_paths = 0
@@ -129,9 +136,10 @@ class MLXDecisionPredictor:
 
             for st in states:
                 st_id = st["id"]
-                answers, tok_cnt = evaluate_state_questions_prefix_sharing(
+                answers, tok_cnt = evaluate_state_questions_fast(
                     self.model,
                     self.tokenizer,
+                    self.cache_pool,
                     state_id=st_id,
                     state_val=st["state"],
                     questions_dict=st["questions"],
@@ -144,9 +152,6 @@ class MLXDecisionPredictor:
                 for q in st["questions"].values():
                     candidate_paths += 1 if q["type"] == "boolean" else len(q["criteria"])
 
-            if hasattr(mx, "metal") and hasattr(mx.metal, "clear_cache"):
-                mx.metal.clear_cache()
-
             return {
                 "schema_version": "openjev-mlx-inference-v1",
                 "checkpoint": {
@@ -156,7 +161,7 @@ class MLXDecisionPredictor:
                 },
                 "temperature": {"value": float(temperature)},
                 "execution": {
-                    "engine": "mlx-prefix-sharing",
+                    "engine": "mlx-fast-prefix-pool",
                     "device": str(mx.default_device()),
                     "states": len(states),
                     "questions": total_questions,
