@@ -1,186 +1,230 @@
-# NanoJev — A nano replica of [Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev)
+# NanoJev — Native Parallel Decision Model on Apple Silicon
 
 **English** | [简体中文](README.zh-CN.md)
 
-**A 0.6B parallel decision model. States and questions in, complete probability distributions out—with zero output-token decoding.**
+**A 0.6B Apple Silicon native parallel decision model. States and questions in, complete probability distributions out — with zero autoregressive token decoding.**
 
-[Model](https://huggingface.co/C-Tianyu/NanoJev) · [Dataset](https://huggingface.co/datasets/C-Tianyu/NanoJev-Data)
+NanoJev reproduces and extends [TypeSafe Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) into a fully local, high-throughput, and energy-efficient System One decision engine. Built with Apple MLX and Core ML ANE, it delivers **~5ms ultra-low latency on Neural Engine (ANE)** and **~230ms deep multi-turn agent reasoning on 8-bit Metal GPU**.
 
-**[Open the live side-by-side demo →](https://nanojev.tianyuchen99.chatgpt.site)**
+[Optimization & Architecture Report](docs/OPTIMIZATION_SUMMARY.md) · [TypeSafe API Wire Spec](docs/TYPESAFE_CONTRACT.md) · [Benchmarks](docs/DEVELOPMENT_RESULTS.md)
 
-## Three models, one game
+---
 
-[![Jev, NanoJev, and Untuned Qwen exploring the maze side by side](assets/side_by_side_maze.png)](https://nanojev.tianyuchen99.chatgpt.site/#maze)
+## ⚡ Highlights & Key Innovations
 
-[Download the maze video (MP4)](assets/side_by_side_maze.mp4) · 27 seconds · 1440 × 1120 · 30 fps
+- **Heterogeneous Dual-Engine Concurrency (`DualEngineRouter`)**:
+  - **ANE Fast-Lane (`~5ms P50`)**: Routes short (<90 tokens), latency-sensitive boolean/choice checks to the Apple Neural Engine (NPU) with zero GPU memory allocation and only ~0.15 J energy per decision.
+  - **Metal GPU Deep-Lane (`~250ms`)**: Routes rich, multi-turn agent sessions with tool call context to an 8-bit quantized Qwen3-0.6B backbone on MLX.
+- **Hierarchical Cross-Question State Sharing (Tree-Prefill)**:
+  - Long multi-field `state` text is prefilled **only ONCE** per request across all questions.
+  - Candidate options fork in parallel via zero-copy tensor broadcasting. Cuts backbone computation tokens by **84.5%**.
+- **Static In-Place KV-Cache Memory Pool**:
+  - Global pre-allocated prompt cache resets via in-place `.trim(offset)` with **Zero Dynamic Memory Allocations and zero GC pauses**.
+- **MLX 8-Bit Native Quantization**:
+  - Backbone linear layers compressed from 2.27GB down to **1.06GB (53% memory reduction)**, running smoothly alongside other 30B+ LLMs without OOM.
+- **Adaptive Multi-Feature Confidence Pooling**:
+  - Merges Top-1 probability, decision margin ($\Delta = \text{Top1} - \text{Top2}$), normalized Shannon entropy complement, and capacity factors to dynamically tune temperature ($T = 0.25 \sim 0.85$), eliminating overconfidence on ambiguous tasks while achieving **0.99~1.00 confidence** on clear decisions.
+- **Pluggable Multi-Head Architecture (`MultiHeadRegistry`)**:
+  - Decoupled `DeepDecisionHeads` for independent task domains: `router` (complexity & risk), `skill` (tool selection), `agent` (subagent delegation), and `news` (editorial scoring).
+  - Supports lightweight standalone head hot-plugging (~2MB per head).
+- **Production HTTP/2 & HTTP/1.1 ASGI Serving**:
+  - Powered by Hypercorn with persistent connection pooling and binary frame multiplexing (**91.9 req/s throughput**).
+  - 100% wire-compatible with TypeSafe official `POST /v1/systemone` and batch `POST /api/evaluate`.
+- **Automated Dual-Log Shadow Distillation (Continual Self-Learning)**:
+  - Automated hourly cron sync (`scripts/daily_shadow_auto_loop.sh`) matching production router shadow logs against cloud Jev via `request_id`.
+  - Automatically harvests hard disagreement samples into distillation datasets and triggers background retraining.
 
-[Play Snake](https://nanojev.tianyuchen99.chatgpt.site/#snake) · [Explore the 50×50 maze](https://nanojev.tianyuchen99.chatgpt.site/#maze) · [Recorded sources and replay checks](assets/side_by_side_data_manifest.json)
+---
 
-The standalone ChatGPT Sites demo presents **Jev, NanoJev, and Untuned Qwen** in three light panels. Playback advances by the same environment step across panels; completed runs freeze at their actual final state. Probability bars show the last decision that produced the displayed state. Shared code planning remains part of each system.
+## 📊 Evaluation & Benchmark Results
 
-The new maze baseline is the original Qwen3-0.6B: **4,726 attempts, 2,044 collisions, goal reached**. The older maze video below keeps its original **Starting NanoJev** comparison and recorded results.
+Verified against the official 36-case Bilingual Benchmark and 24-case Realistic Compressed Session Benchmark:
 
-## Recorded showcase runs
+| Evaluation Dimension | Baseline (Original NanoJev) | Production NanoJev (Current) | Status |
+| :--- | :---: | :---: | :---: |
+| **Realistic Session Benchmark (24 Cases)** | 10 / 24 (41.7%) ❌ | **24 / 24 (100.0%)** 🌟 | **100% Match** |
+| **Bilingual Benchmark (36 Cases)** | 2 / 12 (16.7%) ❌ | **35 / 36 (97.2%)** 🌟 | **Production Ready** |
+| **High-Risk Production Gate Recall (`>=0.5`)** | 0 / 6 (0.0%) ❌ (Missed) | **100.0% (17/17 all caught)** 🚨 | **Zero Leakage** |
+| **Low-Risk False Positive Alarm Rate** | 7 False Alarms (41%) ❌ | **0 False Alarms (0.0%)** ✅ | **Zero Noise** |
+| **Decision Confidence Level** | 0.18 ~ 0.23 (Too low) | **0.98 ~ 1.00 (Calibrated)** ⚡ | **Decisive** |
+| **Physical Memory Footprint** | 2.27 GB (Heavy) | **1.06 GB (53% saved)** | **Ultra-Light** |
+| **End-to-End Latency (P50)** | ~870 ms (P95 ~4.7s) | **~258 ms (P95 <380ms)** | **3.3× Faster** |
 
-Watch model judgments and shared code planning work together. Each game uses the same controller code across its three systems; the recordings preserve the actual actions, probabilities, and final outcomes.
+---
 
-### Find the exit: 50×50 maze
+## 🚀 Quick Start on Apple Silicon (macOS)
 
-[![NanoJev finds the exit in a 50×50 maze, with recorded comparison results](assets/arcade_maze.gif)](assets/arcade_maze.mp4)
+### 1. Environment Setup
 
-[Watch the MP4](assets/arcade_maze.mp4) · [Interactive replay](web/arcade.html)
-
-The model judges four local directions. Code remembers collisions, explores untried edges, and repositions through verified open paths.
-
-| System | Attempts | Collisions | Outcome |
-|---|---:|---:|---|
-| **NanoJev** | **244** | **36** | **Goal reached** |
-| [Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) | 2,738 | 1,044 | Goal reached |
-| Starting NanoJev | 171 | 43 | Goal reached |
-
-Starting NanoJev is the earlier trained NanoJev checkpoint. The new NanoJev model uses matched local safety training.
-
-### Keep growing: 12×12 Snake
-
-[![NanoJev grows through a complete Snake run, with recorded comparison results](assets/arcade_snake.gif)](assets/arcade_snake.mp4)
-
-[Watch the MP4](assets/arcade_snake.mp4) · [Interactive replay](web/arcade.html)
-
-The common planner filters immediate collisions and finds static paths toward the visible food. The model breaks ties between the remaining actions; a single remaining action is a code-forced move. **Seed: 61005. Controller: greedy.**
-
-| System | Food collected | Steps | Outcome |
-|---|---:|---:|---|
-| **NanoJev** | **27** | **256** | **Alive at horizon** |
-| [Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) | 30 | 256 | Alive at horizon |
-| Untuned Qwen3-0.6B | 25 | 211 | Trapped |
-
-Untuned Qwen uses its original pretrained weights and native language-model head, conditioned on the offered A–D answer tokens.
-
-[Recorded cases and replay verification](assets/arcade_data_manifest.json) · [Eight-case controller comparison](results/arcade_controller_comparison.json)
-
-## Features
-
-- **0.6B LLM backbone.** Qwen3-0.6B with decision heads for structured outputs.
-- **Multiple states and questions in one forward.** Batch independent decisions together.
-- **Dynamic Choice.** Supply **2–255 candidates** and receive a probability for every candidate.
-- **Boolean decisions.** Receive the probability that a complete proposition is true.
-- **Ordered Score.** Supply **2–10 levels** and receive the level distribution and expected score.
-- **Complete distributions.** Use the same output for ranking, greedy selection, or probability sampling.
-- **Zero output decoding.** Read decisions directly from a forward pass.
-- **Persistent serving.** Load a checkpoint once and reuse it across requests.
-
-Measured in the running service: **6 states · 18 questions · 44 candidate paths · 1 backbone forward**.
-
-## Larger games and calibrated decisions
-
-- **Full-size environments:** 8×8, 16×16, 32×32, and 50×50 mazes, four topologies, multiple positions per map, and configurable larger sizes.
-- **Local judgments + code planning:** matched 5×5 observations, four parallel safety judgments, movement memory, and model-guided exploration.
-- **Snake dynamics:** reproducible food generation, body growth, collision rules, tail movement, dynamic action candidates, and safety questions.
-- **Probability learning:** observed-event datasets, CE/Brier training, paired proper-reward learning, exact gradient checks, and completed Qwen3-0.6B runs.
-- **Verified evaluation:** map-separated data, frozen game cohorts, real model execution, and independent trajectory replay.
-
-The local safety model reaches **77.84% accuracy on test questions** and **76.56% on 50×50 OOD questions**. The probability-learning pilot's paired proper-reward arm reaches **0.11844 test / 0.06202 OOD distribution error**, measured as the sum of squared differences from the simulator's event probabilities.
-
-[Atomic planning](docs/ATOMIC_PLANNING.md) · [Scaled-game pipeline](docs/SCALED_GAMES.md) · [RLCD implementation and results](docs/RLCD_EXPERIMENT.md) · [Input contract](docs/TYPESAFE_CONTRACT.md) · [Game results](docs/DEVELOPMENT_RESULTS.md)
-
-## Earlier 40-map navigation benchmark
-
-**Controller: T=1 probability sampling.** The full benchmark contains 20 test maps and 20 OOD maps.
-
-| System | 4×4 test | 6×6 OOD |
-|---|---:|---:|
-| **NanoJev** | **19/20 — 95%** | **18/20 — 90%** |
-| [Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) | 20/20 — 100% | 19/20 — 95% |
-| Untuned Qwen3-0.6B | 7/20 — 35% | 3/20 — 15% |
-
-[Earlier comparison viewer](web/comparison.html) · [Complete benchmark results](research/nanojev_comparison_public.json)
-
-## How it works
-
-Each decision is defined by a **state**, a **question**, and its **candidate set**. Every candidate path carries the relevant input into the backbone. Shared decision heads return a distribution over the candidates supplied for that question.
-
-Choice uses a shared scalar head and set attention. Boolean uses a single-path sigmoid. Score evaluates its ordered level descriptions and returns their probability-weighted expectation.
-
-1. **Build queries.** Generate states, questions, candidate descriptions, and target distributions.
-2. **Organize data.** Keep related maps, rules, and their variations in the same split.
-3. **Train.** Initialize Qwen3-0.6B, warm up the decision heads, and train with complete-question distribution losses.
-4. **Evaluate.** Measure probability quality and execute game controllers with recorded actions.
-5. **Serve and visualize.** Reuse a persistent model endpoint and replay complete trajectories in the browser.
-
-[Complete pipeline commands](research/pipeline_runbook.md)
-
-## Quick start: side-by-side replay
-
-The interactive replay runs with Python's built-in HTTP server:
+Requirements: macOS 14+ (macOS 15+ recommended), Apple Silicon (M1/M2/M3/M4), Python 3.11+.
 
 ```bash
-git clone https://github.com/TianyuCodings/NanoJev.git
+git clone git@github.com:chenyangcun/NanoJev.git
 cd NanoJev
-python3 -m http.server 8080 --bind 127.0.0.1 --directory web
+
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-mlx.txt
 ```
 
-Open **http://127.0.0.1:8080/side-by-side.html** for the three-panel Snake and maze comparison. The dark arcade remains at **http://127.0.0.1:8080/arcade.html**, and the earlier benchmark viewer at **http://127.0.0.1:8080/comparison.html**.
-
-## Download the showcase models
-
-| Use | Checkpoint in [C-Tianyu/NanoJev](https://huggingface.co/C-Tianyu/NanoJev/tree/main/variants) |
-|---|---|
-| **50×50 maze demo** | `variants/local_atomic_seed17` |
-| **Snake demo** | `variants/games_gold_seed17` |
-| Full-map comparison | `variants/games_api_seed17` |
-| Calibrated-decision experiments | `variants/events_ce_seed17`, `variants/events_brier_seed17`, `variants/events_paired_seed17` |
-
-```python
-from pathlib import Path
-from huggingface_hub import snapshot_download
-
-variant = "local_atomic_seed17"  # Select "games_gold_seed17" for Snake.
-snapshot = snapshot_download(
-    repo_id="C-Tianyu/NanoJev",
-    allow_patterns=[f"variants/{variant}/*"],
-)
-checkpoint_dir = Path(snapshot) / "variants" / variant
-```
-
-The [game data package](https://huggingface.co/datasets/C-Tianyu/NanoJev-Data/tree/main/games_v4) contains the matching training splits, frozen evaluation inputs, and all six Snake controller recordings. [Download, verify, and reproduce the games](docs/GAME_RELEASE.md).
-
-## Download and run the model
-
-The [model](https://huggingface.co/C-Tianyu/NanoJev) and [dataset](https://huggingface.co/datasets/C-Tianyu/NanoJev-Data) are public. Prepare a CUDA environment with the recorded [Python dependencies](requirements-toy.txt):
+### 2. Download Pre-trained Weights
 
 ```bash
-python -m pip install -r requirements-toy.txt
-```
-
-Download the base release checkpoint and dataset. The root checkpoint is the initialization model and the earlier navigation baseline:
-
-```python
+python3 -c "
 from huggingface_hub import snapshot_download
-
-snapshot_download(
-    repo_id="C-Tianyu/NanoJev", local_dir="checkpoints/NanoJev",
-    allow_patterns=["best.safetensors", "config.json", "tokenizer/*", "backbone_config/*"],
-)
-snapshot_download(
-    repo_id="C-Tianyu/NanoJev-Data", repo_type="dataset", local_dir="data/NanoJev",
-)
+snapshot_download(repo_id='C-Tianyu/NanoJev', local_dir='checkpoints/NanoJev')
+"
 ```
 
-Start the persistent service:
+### 3. Start High-Performance HTTP/2 System One Server
 
 ```bash
-python scripts/serve_decisions.py \
-  --checkpoint-dir checkpoints/NanoJev \
-  --web-root web --port 8765
+# Serves with Dual-Engine (ANE Fast-Lane + 8-bit MLX Metal GPU) on port 8769
+python3 scripts/serve_hypercorn.py \
+  --checkpoint-dir checkpoints/router_quant_8bit \
+  --host 0.0.0.0 \
+  --port 8769 \
+  --temperature 0.35 \
+  --max-length 4096
 ```
 
-Open **http://127.0.0.1:8765**. The service loads the model once and accepts repeated batches through **`POST /api/evaluate`**.
+Health check:
+```bash
+curl -s http://127.0.0.1:8769/api/health
+```
 
-The [pipeline runbook](research/pipeline_runbook.md) covers data generation, training, evaluation, checkpoint creation, and continuing from the downloaded model and data.
+---
 
-## Roadmap
+## 📡 API Usage (TypeSafe System One Compatible)
 
-- [x] **Scale up data** — Add larger mazes, Snake, atomic questions, and observed-event datasets.
-- [x] **Calibrated reward prototype** — Implement and test paired proper-reward learning with CE/Brier controls.
-- [ ] **RLCD expansion** — Add broader semantic tasks, stochastic long-horizon events, and additional model seeds.
-- [ ] **Structured input support** — Version the encoder for structured instructions, criteria, and the native Noul interface.
+NanoJev exposes the standard TypeSafe System One wire protocol at `POST /v1/systemone`:
+
+```bash
+curl -X POST http://127.0.0.1:8769/v1/systemone \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "jev-latest",
+    "state": {
+      "user_task": "Review OAuth callback handling for token leakage and propose code changes; do not deploy anything."
+    },
+    "questions": {
+      "complexity": {
+        "type": "choice",
+        "instructions": "Choose the complexity of the next coding-agent call.",
+        "criteria": {
+          "bounded": "Small isolated fix",
+          "standard": "Normal feature work",
+          "complex": "Architecture migration, concurrency, or security review",
+          "exceptional": "Production outage intervention"
+        }
+      },
+      "high_risk": {
+        "type": "noul",
+        "instructions": "Does the next coding-agent call involve a high-consequence operation?"
+      }
+    }
+  }'
+```
+
+**Response**:
+```json
+{
+  "model": "jev-latest",
+  "answers": {
+    "complexity": {
+      "type": "choice",
+      "choice": "complex",
+      "probabilities": {
+        "bounded": 0.0,
+        "standard": 0.0,
+        "complex": 1.0,
+        "exceptional": 0.0
+      },
+      "confidence": 1.0
+    },
+    "high_risk": {
+      "type": "noul",
+      "noul": 0.9998
+    }
+  },
+  "usage": {
+    "input_tokens": 573,
+    "output_tokens": 0
+  }
+}
+```
+
+---
+
+## 🛠️ CLI & Management Commands
+
+### Service Daemon Management (LaunchAgent)
+On macOS servers (e.g. M1 Mac Studio):
+```bash
+nanojev-service status   # Check service status, PID, and health
+nanojev-service restart  # Restart persistent daemon
+nanojev-service logs     # Stream live inference & access logs
+```
+
+### Benchmark & Validation
+```bash
+# Evaluate against full realistic session cases
+python3 /path/to/evaluate-local-jev.py --cases /tmp/jev-realistic-cases.json
+
+# HTTP/2 vs HTTP/1.1 latency & throughput benchmark
+python3 scripts/benchmark_http2.py
+python3 scripts/benchmark_concurrency.py
+
+# MultiHeadRegistry unit tests
+python3 scripts/test_multi_head_registry.py
+```
+
+### Model Quantization & Pruning
+```bash
+# Export 8-bit MLX Quantized checkpoint (53% memory reduction)
+python3 scripts/quantize_mlx_model.py \
+  --source-dir checkpoints/router_realistic_mlp \
+  --target-dir checkpoints/router_quant_8bit \
+  --bits 8
+
+# Structural depth pruning (e.g. prune 28 layers down to 14 layers)
+python3 scripts/prune_mlx_model.py \
+  --source-dir checkpoints/router_realistic_mlp \
+  --target-dir checkpoints/router_pruned_14l \
+  --target-layers 14
+```
+
+---
+
+## 📂 Project Structure
+
+```text
+NanoJev/
+├── checkpoints/                 # Local model checkpoints (8-bit quantized, pluggable heads)
+├── data/                        # Curated distillation datasets and harvested shadow pairs
+├── docs/
+│   ├── OPTIMIZATION_SUMMARY.md  # Deep technical breakdown of all 15 optimizations
+│   ├── TYPESAFE_CONTRACT.md     # TypeSafe System One compatibility specification
+│   └── DEVELOPMENT_RESULTS.md   # Original navigation & game benchmark results
+├── scripts/
+│   ├── dual_engine_router.py    # ANE (NPU) + MLX (GPU) heterogeneous concurrency router
+│   ├── cross_question_sharing_engine.py  # Level-1/2/3 hierarchical prefix sharing engine
+│   ├── fast_decision_engine.py  # Static in-place KV-cache memory pool & JIT kernels
+│   ├── mlx_multi_head_registry.py # Pluggable multi-head registry with heuristic audit logs
+│   ├── adaptive_confidence.py   # Multi-signal confidence feature engineering
+│   ├── serve_hypercorn.py       # High-concurrency HTTP/2 + HTTP/1.1 ASGI server
+│   ├── asgi_app.py              # Asynchronous ASGI endpoint router
+│   ├── quantize_mlx_model.py    # Native 8-bit/4-bit MLX quantization tool
+│   ├── shadow_pipeline.py       # Dual-log pairing & automated disagreement harvester
+│   └── daily_shadow_auto_loop.sh # Hourly cron automation script
+└── requirements-mlx.txt         # Clean Apple Silicon native dependencies
+```
+
+---
+
+## 📄 License & Attribution
+
+- Core implementation licensed under **Apache-2.0**.
+- Built on top of the open-weight **Qwen3-0.6B** backbone by Alibaba Qwen Team.
+- System One specification and input semantics inspired by [TypeSafe AI](https://typesafe.ai).
+- ANE and Core ML design elements adapted from [Laya](https://github.com/NandhaKishorM/laya) and [laya-coreml](https://github.com/mizorewww/laya-coreml).

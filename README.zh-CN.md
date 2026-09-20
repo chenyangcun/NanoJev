@@ -1,185 +1,231 @@
-# NanoJev — A nano replica of [Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev)
+# NanoJev — 苹果芯片原生并行决策模型 (Apple Silicon Native)
 
-**简体中文** | [English](README.md)
+[English](README.md) · **简体中文**
 
-**一个 0.6B 并行决策模型：输入状态与问题，直接得到完整概率分布，无需生成答案 token。**
+**基于 Qwen3-0.6B 骨干网络的 Apple Silicon 原生并行决策模型。输入应用状态与结构化问题，单次前向输出完整概率分布——零自回归 Token 解码。**
 
-[模型](https://huggingface.co/C-Tianyu/NanoJev) · [数据集](https://huggingface.co/datasets/C-Tianyu/NanoJev-Data)
+NanoJev 复刻并扩展了 [TypeSafe Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) 的 System One 决策范式，打造了一套完全本地化、高并发、超低功耗的智能决策引擎。结合 Apple MLX 与 Core ML ANE，实现了 **Neural Engine (NPU) ~5ms 极速响应** 与 **8-bit Metal GPU ~230ms 复杂多轮深度推理**。
 
-**[打开在线三栏对照演示 →](https://nanojev.tianyuchen99.chatgpt.site)**
+[架构调优全景报告 (技术总结)](docs/OPTIMIZATION_SUMMARY.md) · [TypeSafe API 协议规范](docs/TYPESAFE_CONTRACT.md) · [历史基准测评](docs/DEVELOPMENT_RESULTS.md)
 
-## 三个模型，同一场游戏
+---
 
-[![Jev、NanoJev 与原始 Qwen 并排探索迷宫](assets/side_by_side_maze.png)](https://nanojev.tianyuchen99.chatgpt.site/#maze)
+## ⚡ 核心架构与技术创新
 
-[下载迷宫视频（MP4）](assets/side_by_side_maze.mp4) · 27 秒 · 1440 × 1120 · 30 fps
+- **异构双引擎并发路由 (`DualEngineRouter`)**：
+  - **ANE 极速快车道 (`~5ms P50`)**：针对小于 90 Tokens 的微型命题、轻量选择与布尔判断，自动分流至苹果专属 NPU（Apple Neural Engine），零占用 GPU 显存，单次决策功耗低至 ~0.15 焦耳。
+  - **Metal GPU 深度主车道 (`~250ms`)**：针对包含代码变更、工具调用日志、多轮长会话的复杂任务，分流至基于 MLX 的 8-bit 量化 Qwen3-0.6B 骨干网深度推理。
+- **跨问题三级树状状态共享 (Tree-Prefill State Sharing)**：
+  - 无论单次请求挂载多少个问题，千字长文本 `State` 整个请求全局**仅前向预填充 1 次**；
+  - 候选分支通过零拷贝批次广播并行叉分计算，实际 Token 计算量**暴降 84.5%**。
+- **静态原地复用 KV-Cache 内存池 (`StaticKVCachePool`)**：
+  - 全局静态提示词缓存，每次请求完成后通过指针原地清零重置（`.trim(offset)`），实现**零动态内存申请、零垃圾回收（GC）卡顿**。
+- **MLX 原生 8-bit Affine 矩阵量化**：
+  - 骨干线性层从 2.27GB 深度压缩至 **1.06GB（体积缩减 53.0%）**，可在 88 服务器上与其他 30B+ 大模型平稳共存不爆显存。
+- **自适应多特征置信度工程 (`Adaptive Multi-Feature Confidence`)**：
+  - 融合 Top-1 优势度、候选分离边距（$\Delta = \text{Top1} - \text{Top2}$）、归一化香农熵余数与容量因子，结合动态自适应温度调节（$T = 0.25 \sim 0.85$）；
+  - 模糊任务平滑输出不确定信号，明确任务置信度强力突破至 **0.99 ~ 1.00**。
+- **模块化可插拔多头容器 (`MultiHeadRegistry`)**：
+  - 解耦骨干网与任务分类头，支持按业务域独立挂载 `router`（代码路由）、`skill`（技能选择）、`agent`（分派调度）和 `news`（新闻价值分析）专属头；
+  - 支持外挂加载独立轻量权重文件（每个 Head 仅约 2MB），并内置启发式路由审计日志自动追加记录。
+- **生产级 HTTP/2 & HTTP/1.1 ASGI 异步服务**：
+  - 基于 Hypercorn 原生支持 HTTP/2 二进制帧多路复用与 120 秒 Keep-Alive 连接池，单机并发吞吐高达 **91.9 req/s**；
+  - 100% 兼容 TypeSafe 官方 `POST /v1/systemone` 及 NanoJev 原生 `POST /api/evaluate`。
+- **双端 Shadow 对齐与增量自进化闭环 (Data Flywheel)**：
+  - 本机 Crontab 每小时增量运行 (`scripts/daily_shadow_auto_loop.sh`)，基于 `request_id` 自动对齐路由器生产 Shadow 日志与云端官方 Jev 结果；
+  - 自动捕获分歧样本并转化为标准微调数据集，满额自动触发后台静默训练与平滑热重载。
 
-[打开贪吃蛇](https://nanojev.tianyuchen99.chatgpt.site/#snake) · [探索 50×50 迷宫](https://nanojev.tianyuchen99.chatgpt.site/#maze) · [真实来源与回放核验](assets/side_by_side_data_manifest.json)
+---
 
-独立的 ChatGPT Sites 网站以浅色三栏展示 **Jev、NanoJev 和原始 Qwen**。三个画面按同一环境步推进，已经结束的对局停留在真实终局。概率条展示产生当前画面的最后一次决策；各系统均包含共同的代码规划部分。
+## 📊 评估测试对比总览
 
-新版迷宫对照使用真实的原始 Qwen3-0.6B：**4,726 次尝试、2,044 次碰撞后到达目标**。下方旧迷宫视频继续保留原来的**起始 NanoJev** 对照与实测数字。
+基于 36 场景中英双语基准与 24 场景真实会话压缩状态基准实测验证：
 
-## 真实对局实录
+| 评估维度 | 初始基线 (Baseline) | 当前生产版本 (Production) | 达标状态 |
+| :--- | :---: | :---: | :---: |
+| **真实多轮会话批测 (24 场景)** | 10 / 24 (41.7%) ❌ | **24 / 24 (100.0%)** 🌟 | **100% 满分命中** |
+| **中英全量基础场景 (36 场景)** | 2 / 12 (16.7%) ❌ | **35 / 36 (97.2%)** 🌟 | **生产就绪** |
+| **高风险生产操作拦截召回率 (`>=0.5`)** | 0 / 6 (0.0%) ❌ 严重漏检 | **100.0% (17/17 全拦截)** 🚨 | **高危零漏检** |
+| **低风险操作虚警误报率** | 7 个误报 (虚警率 41%) ❌ | **0 误报 (0.0%)** ✅ | **日常零噪音** |
+| **决策置信度表现 (Confidence)** | 0.18 ~ 0.23 (过低导致降级) | **绝大部分达 0.98 ~ 1.00** ⚡ | **果断清晰** |
+| **显存物理占用空间** | 2.27 GB (容易引起 OOM) | **1.06 GB (显存直降 53%)** | **极致轻量** |
+| **端到端中位耗时 (P50)** | ~870 ms (长尾达 4.7s) | **~258 ms (长尾压入 380ms 内)** | **提速 3.3 倍** |
 
-看模型判断与代码规划共同完成任务。每个游戏的三组系统都使用相同控制代码，回放保留实际动作、概率和完整终局。
+---
 
-### 找到出口：50×50 迷宫
+## 🚀 苹果电脑 (macOS) 快速上手
 
-[![NanoJev、Jev 与起始 NanoJev 探索同一张 50×50 迷宫](assets/arcade_maze.gif)](assets/arcade_maze.mp4)
+### 1. 准备环境
 
-[观看 MP4](assets/arcade_maze.mp4) · [交互回放](web/arcade.html)
-
-模型判断四个局部方向是否可通行；代码记住碰撞、探索未知边，并沿已经走通过的路径重新定位。
-
-| 系统 | 行动尝试 | 碰撞 | 结果 |
-|---|---:|---:|---|
-| **NanoJev** | **244** | **36** | **到达目标** |
-| [Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) | 2,738 | 1,044 | 到达目标 |
-| 起始 NanoJev | 171 | 43 | 到达目标 |
-
-起始 NanoJev 是此前已经训练的 NanoJev checkpoint；新版模型进行了与局部输入对应的安全判断训练。
-
-### 持续成长：12×12 贪吃蛇
-
-[![NanoJev、Jev 与原始 Qwen 使用共同规划器玩贪吃蛇](assets/arcade_snake.gif)](assets/arcade_snake.mp4)
-
-[观看 MP4](assets/arcade_snake.mp4) · [交互回放](web/arcade.html)
-
-共同规划器先排除立即碰撞的动作，再寻找通向当前食物的静态路径。模型在剩余候选之间选择；仅剩一个候选时由代码直接执行。**种子：61005；控制方式：贪心选择。**
-
-| 系统 | 吃到食物 | 步数 | 结果 |
-|---|---:|---:|---|
-| **NanoJev** | **27** | **256** | **达到上限时仍存活** |
-| [Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) | 30 | 256 | 达到上限时仍存活 |
-| 原始 Qwen3-0.6B | 25 | 211 | 陷入死局 |
-
-原始 Qwen 使用未经本项目微调的预训练权重和原生语言模型输出头，概率条件限定为所提供的 A–D 候选 token。
-
-[案例、模型身份与轨迹核验记录](assets/arcade_data_manifest.json)
-
-## 核心能力
-
-| 能力 | 已实现 |
-|---|---|
-| 多状态并行 | 同一批处理多个独立环境状态 |
-| 多问题并行 | 每个状态同时回答多个问题 |
-| 动态候选 | Choice 每题支持 2–255 个候选，共享决策头 |
-| 多种决策类型 | Choice 候选分布、Boolean 概率、Score 的 2–10 级分布及期望 |
-| 直接输出概率 | 一次前向得到完整候选分布，无输出 token 解码 |
-| 轻量底座 | Qwen3-0.6B，支持单卡训练与部署 |
-| 持久推理服务 | 模型加载一次，复用权重处理后续请求 |
-
-实际运行已验证：**6 个状态 · 18 个问题 · 44 条候选路径 · 1 次 backbone 前向**。[并行调用记录](research/parallel_example_v3.json)
-
-## 更大的游戏与校准决策
-
-- **完整环境：** 8×8、16×16、32×32、50×50 迷宫，四类拓扑，每图多个位置，并支持配置更大尺寸。
-- **局部判断与代码规划：** 统一 5×5 局部观察、四方向并行安全判断、移动记忆及模型引导探索。
-- **贪吃蛇规则：** 可复现食物生成、身体增长、碰撞与尾部移动、动态动作候选和安全问题。
-- **概率学习：** 观测事件数据、CE/Brier 训练、成对适当奖励学习、精确梯度检查及已完成的 Qwen3-0.6B 训练。
-- **完整评测：** 按地图划分数据、固定游戏集合、真实模型执行与独立轨迹重放核验。
-
-局部安全模型的测试题准确率为 **77.84%**，50×50 OOD 题为 **76.56%**。概率学习先导中，成对适当奖励组的分布误差为 **测试 0.11844 / OOD 0.06202**；该误差是模型分布与模拟器事件概率之间的差值平方和。
-
-[原子判断与规划](docs/ATOMIC_PLANNING.md) · [大规模游戏流程](docs/SCALED_GAMES.md) · [RLCD 实现与结果](docs/RLCD_EXPERIMENT.md) · [输入契约](docs/TYPESAFE_CONTRACT.md) · [游戏结果](docs/DEVELOPMENT_RESULTS.md)
-
-## 此前完整 40 图导航评测
-
-**控制方式：T=1 概率采样。** 包含 20 张 4×4 测试地图和 20 张 6×6 OOD 地图。
-
-| 模型 | 4×4 测试地图 | 6×6 OOD 地图 |
-|---|---:|---:|
-| **NanoJev** | **19/20 · 95%** | **18/20 · 90%** |
-| [Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) | 20/20 · 100% | 19/20 · 95% |
-| 原始 Qwen3-0.6B | 7/20 · 35% | 3/20 · 15% |
-
-[此前的对照回放](web/comparison.html) · [完整评测结果](research/nanojev_comparison_public.json)
-
-## 实现流程
-
-每个决策由**状态、问题和候选集合**定义。模型编码候选路径，再由共享决策头输出每题的完整分布。Choice 使用共享标量头与集合注意力；Boolean 使用单路径 sigmoid；Score 返回等级分布和概率加权期望。
-
-1. **构建问题：** 生成状态、问题、候选描述和目标分布。
-2. **组织数据：** 相关地图、规则及其变体保留在同一分区。
-3. **训练模型：** 初始化 Qwen3-0.6B，预热决策头，再使用完整问题的分布损失训练。
-4. **执行评测：** 测量概率质量，运行游戏控制器并记录真实动作。
-5. **服务与可视化：** 复用持久模型接口，在浏览器重放完整轨迹。
-
-[完整训练与运行手册（English）](research/pipeline_runbook.md)
-
-## 快速体验三栏对照
-
-交互回放只需 Python：
+运行要求：macOS 14+（推荐 macOS 15+）、Apple Silicon 芯片（M1/M2/M3/M4）、Python 3.11+。
 
 ```bash
-git clone https://github.com/TianyuCodings/NanoJev.git
+git clone git@github.com:chenyangcun/NanoJev.git
 cd NanoJev
-python3 -m http.server 8080 --bind 127.0.0.1 --directory web
+
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-mlx.txt
 ```
 
-打开 **http://127.0.0.1:8080/side-by-side.html**，并排播放贪吃蛇与迷宫的三方实录。深色游戏厅保留在 **http://127.0.0.1:8080/arcade.html**，此前的导航对照页面位于 **http://127.0.0.1:8080/comparison.html**。
-
-## 下载演示使用的模型
-
-| 用途 | [模型仓库](https://huggingface.co/C-Tianyu/NanoJev/tree/main/variants)中的检查点 |
-|---|---|
-| **50×50 迷宫演示** | `variants/local_atomic_seed17` |
-| **Snake 演示** | `variants/games_gold_seed17` |
-| 整图问题对照 | `variants/games_api_seed17` |
-| 校准决策实验 | `variants/events_ce_seed17`、`variants/events_brier_seed17`、`variants/events_paired_seed17` |
-
-```python
-from pathlib import Path
-from huggingface_hub import snapshot_download
-
-variant = "local_atomic_seed17"  # Snake 使用 "games_gold_seed17"。
-snapshot = snapshot_download(
-    repo_id="C-Tianyu/NanoJev",
-    allow_patterns=[f"variants/{variant}/*"],
-)
-checkpoint_dir = Path(snapshot) / "variants" / variant
-```
-
-[游戏数据包](https://huggingface.co/datasets/C-Tianyu/NanoJev-Data/tree/main/games_v4)包含匹配的训练分区、固定评测输入和全部六组 Snake 控制器实录。[下载、校验与复现命令](docs/GAME_RELEASE.md)。
-
-## 下载并运行模型
-
-模型和数据集均可公开下载。在兼容 CUDA 的环境中安装 [Python 依赖](requirements-toy.txt)：
+### 2. 下载预训练权重
 
 ```bash
-python -m pip install -r requirements-toy.txt
-```
-
-下载基础 checkpoint 和数据集。根目录权重对应此前的导航版本，也是后续训练的初始化模型：
-
-```python
+python3 -c "
 from huggingface_hub import snapshot_download
-
-snapshot_download(
-    repo_id="C-Tianyu/NanoJev", local_dir="checkpoints/NanoJev",
-    allow_patterns=["best.safetensors", "config.json", "tokenizer/*", "backbone_config/*"],
-)
-snapshot_download(
-    repo_id="C-Tianyu/NanoJev-Data", repo_type="dataset", local_dir="data/NanoJev",
-)
+snapshot_download(repo_id='C-Tianyu/NanoJev', local_dir='checkpoints/NanoJev')
+"
 ```
 
-启动持久服务：
+### 3. 启动高并发 HTTP/2 决策服务
 
 ```bash
-python scripts/serve_decisions.py \
-  --checkpoint-dir checkpoints/NanoJev \
-  --web-root web --port 8765
+# 启动异构双引擎 (ANE 极速快车道 + 8-bit MLX GPU) 服务，监听 8769 端口
+python3 scripts/serve_hypercorn.py \
+  --checkpoint-dir checkpoints/router_quant_8bit \
+  --host 0.0.0.0 \
+  --port 8769 \
+  --temperature 0.35 \
+  --max-length 4096
 ```
 
-打开 **http://127.0.0.1:8765**，或向 **`POST /api/evaluate`** 发送批量请求。模型只加载一次，后续请求复用权重。
+健康检查：
+```bash
+curl -s http://127.0.0.1:8769/api/health
+```
 
-[完整手册](research/pipeline_runbook.md)包含数据生成、训练、评测、checkpoint 创建，以及从下载模型和数据继续运行的命令。
+---
 
-## 路线图
+## 📡 API 调用示例 (兼容 TypeSafe System One)
 
-- [x] **扩展数据：** 大迷宫、贪吃蛇、原子问题与观测事件数据集。
-- [x] **校准奖励原型：** 实现并验证成对适当奖励学习，提供 CE/Brier 对照。
-- [ ] **扩展 RLCD：** 更多语义任务、随机长程事件与模型种子。
-- [ ] **结构化输入：** 为结构化 instructions、criteria 和原生 Noul 接口建立新版编码器。
+NanoJev 提供完全兼容官方标准的 `POST /v1/systemone` 端点：
+
+```bash
+curl -X POST http://127.0.0.1:8769/v1/systemone \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "jev-latest",
+    "state": {
+      "user_task": "审查 OAuth 回调流程是否存在令牌泄露风险，提出代码修改建议，但不要部署。"
+    },
+    "questions": {
+      "complexity": {
+        "type": "choice",
+        "instructions": "判断接下来 Coding Agent 调用的任务复杂度。",
+        "criteria": {
+          "bounded": "单文件局部微调或改错",
+          "standard": "日常功能需求开发",
+          "complex": "跨模块架构迁移、并发竞态排查或安全审查",
+          "exceptional": "生产严重事故干预或重大故障"
+        }
+      },
+      "high_risk": {
+        "type": "noul",
+        "instructions": "该任务是否涉及生产破坏或高危操作？"
+      }
+    }
+  }'
+```
+
+**响应报文**：
+```json
+{
+  "model": "jev-latest",
+  "answers": {
+    "complexity": {
+      "type": "choice",
+      "choice": "complex",
+      "probabilities": {
+        "bounded": 0.0,
+        "standard": 0.0,
+        "complex": 1.0,
+        "exceptional": 0.0
+      },
+      "confidence": 1.0
+    },
+    "high_risk": {
+      "type": "noul",
+      "noul": 0.9998
+    }
+  },
+  "usage": {
+    "input_tokens": 573,
+    "output_tokens": 0
+  }
+}
+```
+
+---
+
+## 🛠️ CLI 常用管理命令
+
+### 本地开机自启守护进程管理 (LaunchAgent)
+在 M1 Mac Studio 或服务端：
+```bash
+nanojev-service status   # 查看服务运行状态、PID 与健康指标
+nanojev-service restart  # 重启常驻服务
+nanojev-service logs     # 查看实时推理与访问日志
+```
+
+### 基准评测与压测
+```bash
+# 执行完整真实压缩会话场景评测 (24 场景)
+python3 /path/to/evaluate-local-jev.py --cases /tmp/jev-realistic-cases.json
+
+# HTTP/2 与 HTTP/1.1 延迟与高并发吞吐基准压测
+python3 scripts/benchmark_http2.py
+python3 scripts/benchmark_concurrency.py
+
+# 单元测试 (多头注册表与分发规则验证)
+python3 scripts/test_multi_head_registry.py
+```
+
+### 模型量化与结构剪枝
+```bash
+# 导出 8-bit MLX 量化模型 (显存直降 53%)
+python3 scripts/quantize_mlx_model.py \
+  --source-dir checkpoints/router_realistic_mlp \
+  --target-dir checkpoints/router_quant_8bit \
+  --bits 8
+
+# 结构化层剪枝 (如 28 层剪枝为 14 层)
+python3 scripts/prune_mlx_model.py \
+  --source-dir checkpoints/router_realistic_mlp \
+  --target-dir checkpoints/router_pruned_14l \
+  --target-layers 14
+```
+
+---
+
+## 📂 核心代码目录结构
+
+```text
+NanoJev/
+├── checkpoints/                 # 模型检查点目录 (8-bit量化权重、可插拔头)
+├── data/                        # 对齐训练集与 Shadow 自动蒸馏数据集
+├── docs/
+│   ├── OPTIMIZATION_SUMMARY.md  # 15 项深度技术调优全景总结报告
+│   ├── TYPESAFE_CONTRACT.md     # TypeSafe System One 兼容性契约与输入规范
+│   └── DEVELOPMENT_RESULTS.md   # 初始游戏与导航基准开发记录
+├── scripts/
+│   ├── dual_engine_router.py    # ANE (NPU) + MLX (GPU) 异构并发分流路由器
+│   ├── cross_question_sharing_engine.py  # 三级树状跨问题状态共享与早停引擎
+│   ├── fast_decision_engine.py  # 静态就地复用 KV-Cache 内存池与 JIT 内核融合
+│   ├── mlx_multi_head_registry.py # 模块化可插拔多头容器与启发式审计日志
+│   ├── adaptive_confidence.py   # 自适应多信号置信度特征工程算法
+│   ├── serve_hypercorn.py       # 高并发 HTTP/2 + HTTP/1.1 异步 ASGI 服务入口
+│   ├── asgi_app.py              # 异步 ASGI 端点路由与数据适配
+│   ├── quantize_mlx_model.py    # 原生 8-bit/4-bit 权重量化脚本
+│   ├── shadow_pipeline.py       # 双端日志自动配对分析与分歧样本萃取
+│   └── daily_shadow_auto_loop.sh # 每小时定时增量自进化闭环脚本
+└── requirements-mlx.txt         # 纯净 Apple Silicon 原生运行依赖清单
+```
+
+---
+
+## 📄 开源许可与致谢
+
+- 核心实现基于 **Apache-2.0** 许可证开源。
+- 骨干网络源自阿里巴巴通义千问团队开源的 **Qwen3-0.6B** 模型。
+- 决策接口定义与 System One 范式受 [TypeSafe AI](https://typesafe.ai) 启发。
+- ANE 与 Core ML 部分设计参考了 [Laya](https://github.com/NandhaKishorM/laya) 与 [laya-coreml](https://github.com/mizorewww/laya-coreml)。
