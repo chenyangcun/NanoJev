@@ -22,20 +22,24 @@ import math
 from typing import Any, Dict, Tuple
 
 
-def calculate_confidence(probs: Dict[str, float]) -> float:
-    """Calculate normalized confidence in [0, 1] from categorical probability distribution.
+def calculate_confidence(probs: Dict[str, float], qtype: str = "choice") -> float:
+    """Calculate calibrated adaptive confidence in [0, 1] using multi-feature pooling.
 
-    Uses normalized entropy complement: 1 - H(p) / log(K).
-    For K=1, confidence is 1.0.
+    Integrates Top1, Margin gap (Top1 - Top2), and Normalized Entropy complement.
     """
-    values = list(probs.values())
-    k = len(values)
-    if k <= 1:
-        return 1.0
-    entropy = -sum(p * math.log(max(p, 1e-12)) for p in values if p > 0)
-    max_entropy = math.log(k)
-    confidence = max(0.0, min(1.0, 1.0 - (entropy / max_entropy)))
-    return round(confidence, 4)
+    try:
+        from adaptive_confidence import calculate_adaptive_confidence
+        return calculate_adaptive_confidence(probs, qtype=qtype)
+    except Exception:
+        # Fallback to standard Shannon entropy complement
+        values = list(probs.values())
+        k = len(values)
+        if k <= 1:
+            return 1.0
+        entropy = -sum(p * math.log(max(p, 1e-12)) for p in values if p > 0)
+        max_entropy = math.log(k)
+        confidence = max(0.0, min(1.0, 1.0 - (entropy / max_entropy)))
+        return round(confidence, 4)
 
 
 def typesafe_request_to_nanojev(ts_payload: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -160,7 +164,7 @@ def nanojev_response_to_typesafe(nj_output: Dict[str, Any], meta: Dict[str, Any]
                 "type": "choice",
                 "choice": nj_ans["choice"],
                 "probabilities": probs,
-                "confidence": calculate_confidence(probs),
+                "confidence": calculate_confidence(probs, qtype="choice"),
             }
 
         elif q_type == "score":
@@ -171,7 +175,7 @@ def nanojev_response_to_typesafe(nj_output: Dict[str, Any], meta: Dict[str, Any]
                 "score": round(nj_ans["score"], 2),
                 "legend": legend,
                 "probabilities": probs,
-                "confidence": calculate_confidence(probs),
+                "confidence": calculate_confidence(probs, qtype="score"),
             }
 
     total_input_tokens = sum(len(ex["leaf_tokens"]) for ex in nj_output.get("examples", []))
