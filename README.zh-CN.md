@@ -1,10 +1,10 @@
-# NanoJev — 苹果芯片原生并行决策模型 (Apple Silicon Native)
+# NanoJev-MLX — 苹果芯片原生并行决策模型 (Apple Silicon Native)
 
 [English](README.md) · **简体中文**
 
 **基于 Qwen3-0.6B 骨干网络的 Apple Silicon 原生并行决策模型。输入应用状态与结构化问题，单次前向输出完整概率分布——零自回归 Token 解码。**
 
-NanoJev Fork 并扩展自上游开源项目 [TianyuCodings/NanoJev](https://github.com/TianyuCodings/NanoJev)，复刻并深入推进了 [TypeSafe Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) 的 System One 决策范式，打造了一套完全本地化、高并发、超低功耗的智能决策引擎。结合 Apple MLX 与 Core ML ANE，实现了 **Neural Engine (NPU) ~5ms 极速响应** 与 **8-bit Metal GPU ~230ms 复杂多轮深度推理**。
+NanoJev-MLX Fork 并扩展自上游开源项目 [TianyuCodings/NanoJev](https://github.com/TianyuCodings/NanoJev)，复刻并深入推进了 [TypeSafe Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) 的 System One 决策范式，打造了一套完全本地化、高并发、超低功耗的智能决策引擎。结合 Apple MLX 与 Core ML ANE，实现了 **Neural Engine (NPU) ~5ms 极速响应** 与 **8-bit Metal GPU ~230ms 复杂多轮深度推理**。
 
 [上游源项目 (TianyuCodings/NanoJev)](https://github.com/TianyuCodings/NanoJev) · [架构调优全景报告 (技术总结)](docs/OPTIMIZATION_SUMMARY.md) · [TypeSafe API 协议规范](docs/TYPESAFE_CONTRACT.md) · [历史基准测评](docs/DEVELOPMENT_RESULTS.md)
 
@@ -41,7 +41,7 @@ NanoJev Fork 并扩展自上游开源项目 [TianyuCodings/NanoJev](https://gith
 
 基于 36 场景中英双语基准与 24 场景真实会话压缩状态基准实测验证：
 
-| 评估维度 | 初始基线 (Baseline) | 当前生产版本 (Production) | 达标状态 |
+| 评估维度 | 初始基线 (Baseline) | 当前版本 (NanoJev-MLX) | 达标状态 |
 | :--- | :---: | :---: | :---: |
 | **真实多轮会话批测 (24 场景)** | 10 / 24 (41.7%) ❌ | **24 / 24 (100.0%)** 🌟 | **100% 满分命中** |
 | **中英全量基础场景 (36 场景)** | 2 / 12 (16.7%) ❌ | **35 / 36 (97.2%)** 🌟 | **生产就绪** |
@@ -60,8 +60,8 @@ NanoJev Fork 并扩展自上游开源项目 [TianyuCodings/NanoJev](https://gith
 运行要求：macOS 14+（推荐 macOS 15+）、Apple Silicon 芯片（M1/M2/M3/M4）、Python 3.11+。
 
 ```bash
-git clone git@github.com:chenyangcun/NanoJev.git
-cd NanoJev
+git clone git@github.com:chenyangcun/NanoJev-MLX.git
+cd NanoJev-MLX
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -98,7 +98,7 @@ curl -s http://127.0.0.1:8769/api/health
 
 ## 📡 API 调用示例 (兼容 TypeSafe System One)
 
-NanoJev 提供完全兼容官方标准的 `POST /v1/systemone` 端点：
+NanoJev-MLX 提供完全兼容官方标准的 `POST /v1/systemone` 端点：
 
 ```bash
 curl -X POST http://127.0.0.1:8769/v1/systemone \
@@ -200,7 +200,7 @@ python3 scripts/prune_mlx_model.py \
 ## 📂 核心代码目录结构
 
 ```text
-NanoJev/
+NanoJev-MLX/
 ├── checkpoints/                 # 模型检查点目录 (8-bit量化权重、可插拔头)
 ├── data/                        # 对齐训练集与 Shadow 自动蒸馏数据集
 ├── docs/

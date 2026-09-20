@@ -1,10 +1,10 @@
-# NanoJev — Native Parallel Decision Model on Apple Silicon
+# NanoJev-MLX — Native Parallel Decision Model on Apple Silicon
 
 **English** | [简体中文](README.zh-CN.md)
 
 **A 0.6B Apple Silicon native parallel decision model. States and questions in, complete probability distributions out — with zero autoregressive token decoding.**
 
-NanoJev is forked and extended from the original project [TianyuCodings/NanoJev](https://github.com/TianyuCodings/NanoJev), reproducing and advancing [TypeSafe Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) into a fully local, high-throughput, and energy-efficient System One decision engine. Built with Apple MLX and Core ML ANE, it delivers **~5ms ultra-low latency on Neural Engine (ANE)** and **~230ms deep multi-turn agent reasoning on 8-bit Metal GPU**.
+NanoJev-MLX is forked and extended from the original project [TianyuCodings/NanoJev](https://github.com/TianyuCodings/NanoJev), reproducing and advancing [TypeSafe Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) into a fully local, high-throughput, and energy-efficient System One decision engine. Built with Apple MLX and Core ML ANE, it delivers **~5ms ultra-low latency on Neural Engine (ANE)** and **~230ms deep multi-turn agent reasoning on 8-bit Metal GPU**.
 
 [Upstream Project (TianyuCodings/NanoJev)](https://github.com/TianyuCodings/NanoJev) · [Optimization & Architecture Report](docs/OPTIMIZATION_SUMMARY.md) · [TypeSafe API Wire Spec](docs/TYPESAFE_CONTRACT.md) · [Benchmarks](docs/DEVELOPMENT_RESULTS.md)
 
@@ -40,7 +40,7 @@ NanoJev is forked and extended from the original project [TianyuCodings/NanoJev]
 
 Verified against the official 36-case Bilingual Benchmark and 24-case Realistic Compressed Session Benchmark:
 
-| Evaluation Dimension | Baseline (Original NanoJev) | Production NanoJev (Current) | Status |
+| Evaluation Dimension | Baseline (Original NanoJev) | NanoJev-MLX (Current) | Status |
 | :--- | :---: | :---: | :---: |
 | **Realistic Session Benchmark (24 Cases)** | 10 / 24 (41.7%) ❌ | **24 / 24 (100.0%)** 🌟 | **100% Match** |
 | **Bilingual Benchmark (36 Cases)** | 2 / 12 (16.7%) ❌ | **35 / 36 (97.2%)** 🌟 | **Production Ready** |
@@ -59,8 +59,8 @@ Verified against the official 36-case Bilingual Benchmark and 24-case Realistic 
 Requirements: macOS 14+ (macOS 15+ recommended), Apple Silicon (M1/M2/M3/M4), Python 3.11+.
 
 ```bash
-git clone git@github.com:chenyangcun/NanoJev.git
-cd NanoJev
+git clone git@github.com:chenyangcun/NanoJev-MLX.git
+cd NanoJev-MLX
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -97,7 +97,7 @@ curl -s http://127.0.0.1:8769/api/health
 
 ## 📡 API Usage (TypeSafe System One Compatible)
 
-NanoJev exposes the standard TypeSafe System One wire protocol at `POST /v1/systemone`:
+NanoJev-MLX exposes the standard TypeSafe System One wire protocol at `POST /v1/systemone`:
 
 ```bash
 curl -X POST http://127.0.0.1:8769/v1/systemone \
@@ -199,7 +199,7 @@ python3 scripts/prune_mlx_model.py \
 ## 📂 Project Structure
 
 ```text
-NanoJev/
+NanoJev-MLX/
 ├── checkpoints/                 # Local model checkpoints (8-bit quantized, pluggable heads)
 ├── data/                        # Curated distillation datasets and harvested shadow pairs
 ├── docs/
