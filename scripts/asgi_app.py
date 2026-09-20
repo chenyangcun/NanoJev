@@ -61,7 +61,7 @@ class NanoJevASGIApp:
         path = scope.get("path", "")
         method = scope.get("method", "GET")
 
-        if method == "GET":
+        if method in ("GET", "HEAD"):
             if path == "/api/health":
                 has_ane = getattr(self.engine, "ane_agent", None) is not None
                 body = json.dumps({
@@ -75,7 +75,10 @@ class NanoJevASGIApp:
                     "adaptive_temperature": getattr(self.engine.gpu_engine, "enable_adaptive_temp", True),
                     "early_exit_layer": getattr(self.engine.gpu_engine, "early_exit_layer", 0),
                 }).encode("utf-8")
-                await self.send_response(send, 200, body, "application/json; charset=utf-8")
+                if method == "HEAD":
+                    await self.send_response(send, 200, b"", "application/json; charset=utf-8", content_length=len(body))
+                else:
+                    await self.send_response(send, 200, body, "application/json; charset=utf-8")
                 return
 
             # Static files
@@ -83,7 +86,11 @@ class NanoJevASGIApp:
             target = (self.web_root / rel).resolve()
             if target.is_relative_to(self.web_root) and target.is_file():
                 mime = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
-                await self.send_response(send, 200, target.read_bytes(), mime)
+                data = target.read_bytes()
+                if method == "HEAD":
+                    await self.send_response(send, 200, b"", mime, content_length=len(data))
+                else:
+                    await self.send_response(send, 200, data, mime)
                 return
 
             await self.send_response(send, 404, b'{"error":"File not found"}', "application/json; charset=utf-8")
@@ -145,10 +152,11 @@ class NanoJevASGIApp:
             err = json.dumps({"error": f"MLX inference error: {str(exc)}"}).encode("utf-8")
             await self.send_response(send, 500, err, "application/json; charset=utf-8")
 
-    async def send_response(self, send, status: int, body: bytes, content_type: str):
+    async def send_response(self, send, status: int, body: bytes, content_type: str, content_length: Optional[int] = None):
+        cl = len(body) if content_length is None else content_length
         headers = [
             (b"content-type", content_type.encode("utf-8")),
-            (b"content-length", str(len(body)).encode("utf-8")),
+            (b"content-length", str(cl).encode("utf-8")),
             (b"cache-control", b"no-store"),
         ]
         await send({"type": "http.response.start", "status": status, "headers": headers})
