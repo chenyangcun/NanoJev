@@ -4,9 +4,9 @@
 
 **A 0.6B Apple Silicon native parallel decision model. States and questions in, complete probability distributions out — with zero autoregressive token decoding.**
 
-NanoJev reproduces and extends [TypeSafe Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) into a fully local, high-throughput, and energy-efficient System One decision engine. Built with Apple MLX and Core ML ANE, it delivers **~5ms ultra-low latency on Neural Engine (ANE)** and **~230ms deep multi-turn agent reasoning on 8-bit Metal GPU**.
+NanoJev is forked and extended from the original project [TianyuCodings/NanoJev](https://github.com/TianyuCodings/NanoJev), reproducing and advancing [TypeSafe Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) into a fully local, high-throughput, and energy-efficient System One decision engine. Built with Apple MLX and Core ML ANE, it delivers **~5ms ultra-low latency on Neural Engine (ANE)** and **~230ms deep multi-turn agent reasoning on 8-bit Metal GPU**.
 
-[Optimization & Architecture Report](docs/OPTIMIZATION_SUMMARY.md) · [TypeSafe API Wire Spec](docs/TYPESAFE_CONTRACT.md) · [Benchmarks](docs/DEVELOPMENT_RESULTS.md)
+[Upstream Project (TianyuCodings/NanoJev)](https://github.com/TianyuCodings/NanoJev) · [Optimization & Architecture Report](docs/OPTIMIZATION_SUMMARY.md) · [TypeSafe API Wire Spec](docs/TYPESAFE_CONTRACT.md) · [Benchmarks](docs/DEVELOPMENT_RESULTS.md)
 
 ---
 
@@ -225,6 +225,7 @@ NanoJev/
 ## 📄 License & Attribution
 
 - Core implementation licensed under **Apache-2.0**.
+- Forked and evolved from the original [TianyuCodings/NanoJev](https://github.com/TianyuCodings/NanoJev) by Tianyu Chen.
 - Built on top of the open-weight **Qwen3-0.6B** backbone by Alibaba Qwen Team.
 - System One specification and input semantics inspired by [TypeSafe AI](https://typesafe.ai).
 - ANE and Core ML design elements adapted from [Laya](https://github.com/NandhaKishorM/laya) and [laya-coreml](https://github.com/mizorewww/laya-coreml).

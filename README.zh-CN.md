@@ -4,9 +4,9 @@
 
 **基于 Qwen3-0.6B 骨干网络的 Apple Silicon 原生并行决策模型。输入应用状态与结构化问题，单次前向输出完整概率分布——零自回归 Token 解码。**
 
-NanoJev 复刻并扩展了 [TypeSafe Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) 的 System One 决策范式，打造了一套完全本地化、高并发、超低功耗的智能决策引擎。结合 Apple MLX 与 Core ML ANE，实现了 **Neural Engine (NPU) ~5ms 极速响应** 与 **8-bit Metal GPU ~230ms 复杂多轮深度推理**。
+NanoJev Fork 并扩展自上游开源项目 [TianyuCodings/NanoJev](https://github.com/TianyuCodings/NanoJev)，复刻并深入推进了 [TypeSafe Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev) 的 System One 决策范式，打造了一套完全本地化、高并发、超低功耗的智能决策引擎。结合 Apple MLX 与 Core ML ANE，实现了 **Neural Engine (NPU) ~5ms 极速响应** 与 **8-bit Metal GPU ~230ms 复杂多轮深度推理**。
 
-[架构调优全景报告 (技术总结)](docs/OPTIMIZATION_SUMMARY.md) · [TypeSafe API 协议规范](docs/TYPESAFE_CONTRACT.md) · [历史基准测评](docs/DEVELOPMENT_RESULTS.md)
+[上游源项目 (TianyuCodings/NanoJev)](https://github.com/TianyuCodings/NanoJev) · [架构调优全景报告 (技术总结)](docs/OPTIMIZATION_SUMMARY.md) · [TypeSafe API 协议规范](docs/TYPESAFE_CONTRACT.md) · [历史基准测评](docs/DEVELOPMENT_RESULTS.md)
 
 ---
 
@@ -226,6 +226,7 @@ NanoJev/
 ## 📄 开源许可与致谢
 
 - 核心实现基于 **Apache-2.0** 许可证开源。
+- 本项目 Fork 并演进自 Tianyu Chen 开源的原始项目 [TianyuCodings/NanoJev](https://github.com/TianyuCodings/NanoJev)。
 - 骨干网络源自阿里巴巴通义千问团队开源的 **Qwen3-0.6B** 模型。
 - 决策接口定义与 System One 范式受 [TypeSafe AI](https://typesafe.ai) 启发。
 - ANE 与 Core ML 部分设计参考了 [Laya](https://github.com/NandhaKishorM/laya) 与 [laya-coreml](https://github.com/mizorewww/laya-coreml)。
