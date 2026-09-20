@@ -103,11 +103,18 @@ def evaluate_cached_dev(heads, cached_dev, batch_size=16):
 
         # Measure accuracy
         for ex, l in zip(examples, logits):
-            if ex["qid"] == "complexity":
-                pred = ex["candidate_ids"][int(mx.argmax(l[:len(ex["candidate_ids"])]).item())]
-                if pred == ex["gold_index"] or (isinstance(ex.get("gold"), dict) and pred == ex["gold"].get("complexity")):
+            pred_idx = int(mx.argmax(l[:len(ex["candidate_ids"])]).item())
+            pred_val = ex["candidate_ids"][pred_idx]
+            gold_val = ex.get("gold")
+            if isinstance(gold_val, dict):
+                gold_val = gold_val.get(ex["qid"])
+            if gold_val is not None:
+                if ex["type"] == "boolean":
+                    if bool(pred_idx) == bool(gold_val):
+                        correct_comp += 1
+                elif str(pred_val) == str(gold_val):
                     correct_comp += 1
-                total_comp += 1
+            total_comp += 1
 
     acc = correct_comp / max(1, total_comp)
     return total_loss / len(cached_dev), acc
@@ -219,10 +226,14 @@ def main():
                 for k in f.keys():
                     if k.startswith("backbone."):
                         full_weights[k] = f.get_tensor(k)
+                    elif args.head_name != "router":
+                        # Preserve existing heads when training a specialized head
+                        full_weights[k] = f.get_tensor(k)
             # Add deep heads with namespace
             for k, v in flat_weights.items():
-                full_weights["heads." + k] = np.array(v)
-                if args.head_name != "router":
+                if args.head_name == "router":
+                    full_weights["heads." + k] = np.array(v)
+                else:
                     full_weights[f"heads.{args.head_name}.{k}"] = np.array(v)
 
             save_file(full_weights, str(output_dir / "best.safetensors"))

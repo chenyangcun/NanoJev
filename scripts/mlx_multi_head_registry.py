@@ -102,7 +102,11 @@ class MultiHeadRegistry(nn.Module):
         if any(k in qid_lower for k in ("complex", "risk", "indep", "route", "tier")):
             matched_name = "router"
             matched_rule = "pattern:router_keywords"
-        elif any(k in qid_lower for k in ("skill", "tool", "plugin", "action", "ability")):
+        elif (
+            any(k in qid_lower for k in ("skill", "tool", "plugin", "action", "ability", "shortlist"))
+            or qid_lower.startswith("verify_")
+            or "skill" in str(question_dict.get("instructions", "")).lower()
+        ):
             matched_name = "skill"
             matched_rule = "pattern:skill_keywords"
         elif any(k in qid_lower for k in ("agent", "subagent", "worker", "delegat")):
