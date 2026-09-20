@@ -6,7 +6,7 @@ DATE_STR="${1:-$(date +%Y-%m-%d)}"
 ROUTER_LOGS="/Users/chenyc/Documents/study/jev-cliproxy-router/logs"
 DATA_FILE="/Users/chenyc/Documents/study/NanoJev/data/harvested_shadow_data.jsonl"
 STATE_FILE="/Users/chenyc/Documents/study/NanoJev/data/.processed_shadow_ids.json"
-REMOTE_HOST="chenyc@192.168.123.88"
+REMOTE_HOST="${NANOJEV_REMOTE_HOST:-chenyc@192.168.123.88}"
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting Hourly Incremental Shadow Scan for ${DATE_STR}..."
 cd /Users/chenyc/Documents/study/NanoJev
@@ -19,7 +19,7 @@ PYTHONPATH=scripts .venv/bin/python3 scripts/shadow_pipeline.py \
 
 # If accumulated hard cases reach threshold (>= 10), trigger remote retraining
 if [[ -f "${DATA_FILE}" ]] && [[ $(wc -l < "${DATA_FILE}") -ge 10 ]]; then
-  echo "=== Accumulated $(wc -l < "${DATA_FILE}") hard cases (>=10). Triggering remote MLX retraining on 88 ==="
+  echo "=== Accumulated $(wc -l < "${DATA_FILE}") hard cases (>=10). Triggering remote MLX retraining on remote GPU ==="
   rtk scp "${DATA_FILE}" "${REMOTE_HOST}:~/work/NanoJev/data/harvested_shadow_data.jsonl"
 
   ssh "${REMOTE_HOST}" "

@@ -59,7 +59,7 @@ def run_scenario(name: str, payload: dict, server_url: str):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--server-url", default="http://192.168.123.88:8769")
+    parser.add_argument("--server-url", default=os.environ.get("NANOJEV_SERVER_URL", "http://127.0.0.1:8769"))
     args = parser.parse_args()
 
     # Standard routing question schema from router audit

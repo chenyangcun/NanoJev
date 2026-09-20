@@ -4,7 +4,9 @@ import json
 import time
 import urllib.request
 
-server_url = "http://192.168.123.88:8769/v1/systemone"
+import os
+
+server_url = os.environ.get("NANOJEV_SERVER_URL", "http://127.0.0.1:8769/v1/systemone")
 
 # 1. Load exact rubric from training data
 with open("data/router_train.jsonl") as f:

@@ -131,7 +131,7 @@ def evaluate_audit_dataset(audit_path: str, server_url: str, limit: int = 0):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--audit-log", default="/Users/chenyc/Downloads/router/jev-router-audit.jsonl")
-    parser.add_argument("--server-url", default="http://192.168.123.88:8769")
+    parser.add_argument("--server-url", default=os.environ.get("NANOJEV_SERVER_URL", "http://127.0.0.1:8769"))
     parser.add_argument("--limit", type=int, default=0)
     args = parser.parse_args()
     evaluate_audit_dataset(args.audit_log, args.server_url, args.limit)
