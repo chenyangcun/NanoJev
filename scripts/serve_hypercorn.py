@@ -26,6 +26,8 @@ def main():
     parser.add_argument("--disable-adaptive-temp", action="store_true", help="Disable adaptive temperature")
     parser.add_argument("--early-exit-layer", type=int, default=14, help="Intermediate layer for dynamic early exit probe (0 to disable)")
     parser.add_argument("--early-exit-confidence", type=float, default=0.98, help="Confidence threshold for early exit")
+    parser.add_argument("--disable-ane", action="store_true", help="Disable ANE fast lane")
+    parser.add_argument("--ane-checkpoint-dir", default="checkpoints/laya_multilingual_ane", help="Path to ANE CoreML model")
     args = parser.parse_args()
 
     app = NanoJevASGIApp(
@@ -36,6 +38,8 @@ def main():
         enable_adaptive_temp=not args.disable_adaptive_temp,
         early_exit_layer=args.early_exit_layer,
         early_exit_confidence=args.early_exit_confidence,
+        enable_ane=not args.disable_ane,
+        ane_checkpoint_dir=args.ane_checkpoint_dir,
     )
 
     config = Config()

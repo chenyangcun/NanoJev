@@ -14,7 +14,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from predict_mlx_decisions import MLXDecisionPredictor
 from predict_toy_decisions import reject_nonfinite, unique_object, validate_request
@@ -31,13 +31,16 @@ class NanoJevASGIApp:
         enable_adaptive_temp: bool = True,
         early_exit_layer: int = 0,
         early_exit_confidence: float = 0.98,
+        enable_ane: bool = True,
+        ane_checkpoint_dir: Optional[str] = "checkpoints/laya_multilingual_ane",
     ):
-        self.engine = MLXDecisionPredictor(
-            checkpoint_dir,
+        from dual_engine_router import DualEngineRouter
+        self.engine = DualEngineRouter(
+            gpu_checkpoint_dir=checkpoint_dir,
+            ane_checkpoint_dir=ane_checkpoint_dir,
+            enable_ane=enable_ane,
             max_length=max_length,
-            enable_adaptive_temp=enable_adaptive_temp,
-            early_exit_layer=early_exit_layer,
-            early_exit_confidence=early_exit_confidence,
+            default_temperature=default_temperature,
         )
         self.web_root = Path(web_root).resolve()
         self.default_temperature = default_temperature
@@ -60,14 +63,17 @@ class NanoJevASGIApp:
 
         if method == "GET":
             if path == "/api/health":
+                has_ane = getattr(self.engine, "ane_agent", None) is not None
                 body = json.dumps({
                     "ready": True,
-                    "engine": "mlx-asgi-h2",
+                    "engine": "nanojev-dual-engine",
+                    "ane_fastlane_available": has_ane,
+                    "gpu_engine": "mlx-qwen3-8bit",
                     "http_version": scope.get("http_version", "1.1"),
                     "model_loaded_once": True,
                     "provider_calls": 0,
-                    "adaptive_temperature": self.engine.enable_adaptive_temp,
-                    "early_exit_layer": self.engine.early_exit_layer,
+                    "adaptive_temperature": getattr(self.engine.gpu_engine, "enable_adaptive_temp", True),
+                    "early_exit_layer": getattr(self.engine.gpu_engine, "early_exit_layer", 0),
                 }).encode("utf-8")
                 await self.send_response(send, 200, body, "application/json; charset=utf-8")
                 return
