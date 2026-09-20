@@ -118,6 +118,8 @@ def main():
     parser.add_argument("--input", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--base-checkpoint", default="checkpoints/NanoJev")
+    parser.add_argument("--head-name", default="router", help="Name of the head domain to train (e.g. router, skill, agent, news)")
+    parser.add_argument("--export-standalone-head", action="store_true", help="Also export lightweight standalone head to <output_dir>/heads/<head_name>.safetensors (~2MB)")
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--lr", type=float, default=2e-3)
     parser.add_argument("--batch-questions", type=int, default=16)
@@ -217,13 +219,26 @@ def main():
                 for k in f.keys():
                     if k.startswith("backbone."):
                         full_weights[k] = f.get_tensor(k)
-            # Add deep heads
+            # Add deep heads with namespace
             for k, v in flat_weights.items():
                 full_weights["heads." + k] = np.array(v)
+                if args.head_name != "router":
+                    full_weights[f"heads.{args.head_name}.{k}"] = np.array(v)
+
             save_file(full_weights, str(output_dir / "best.safetensors"))
+
+            # Optionally export lightweight standalone head (~2MB)
+            if args.export_standalone_head:
+                heads_dir = output_dir / "heads"
+                heads_dir.mkdir(parents=True, exist_ok=True)
+                standalone = {f"heads.{k}": np.array(v) for k, v in flat_weights.items()}
+                save_file(standalone, str(heads_dir / f"{args.head_name}.safetensors"))
+                print(f"[Pluggable] Exported standalone head: {heads_dir / f'{args.head_name}.safetensors'}")
+
             (output_dir / "config.json").write_text(json.dumps({
                 "model": "Qwen3-0.6B",
                 "heads_architecture": "deep_mlp",
+                "head_name": args.head_name,
                 "set_head": run_config.get("set_head", "none"),
                 "max_length": args.max_length,
                 "best_dev_loss": best_dev_loss,

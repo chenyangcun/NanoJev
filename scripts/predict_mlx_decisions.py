@@ -58,15 +58,16 @@ def load_mlx_decision_model(checkpoint_dir: str):
 
     model = MLXDecisionModel(backbone, set_head=run_config.get("set_head", "none"))
 
-    # Check if checkpoint uses DeepDecisionHeads (2-layer MLP)
-    if run_config.get("heads_architecture") == "deep_mlp":
-        from mlx_deep_heads import DeepDecisionHeads
-        model.heads = DeepDecisionHeads(hidden_size=model.heads.hidden_size, set_head=run_config.get("set_head", "none"))
+    from mlx_deep_heads import DeepDecisionHeads
+    from mlx_multi_head_registry import MultiHeadRegistry
+
+    hidden_size = backbone.model.embed_tokens.weight.shape[1]
+    registry = MultiHeadRegistry(hidden_size=hidden_size, default_head_name="router")
 
     # Load weights from best.safetensors into model
     weights_path = str(paths["weights"])
     backbone_weights = {}
-    head_weights = {}
+    head_weights_by_name = {}
 
     with safe_open(weights_path, framework="numpy") as f:
         for k in f.keys():
@@ -74,27 +75,64 @@ def load_mlx_decision_model(checkpoint_dir: str):
             if k.startswith("backbone."):
                 clean_k = "model." + k[len("backbone.") :]
                 backbone_weights[clean_k] = tensor
-            elif k.startswith("heads."):
-                head_weights[k] = tensor
-            elif k.startswith("norm."):
-                head_weights["heads." + k] = tensor
-            elif k.startswith("scalar."):
-                head_weights["heads." + k] = tensor
-            elif k.startswith("fc1.") or k.startswith("fc2."):
-                head_weights["heads." + k] = tensor
-            elif k.startswith("set_project."):
-                head_weights["heads." + k] = tensor
-            elif k.startswith("set_output."):
-                head_weights["heads." + k] = tensor
-            elif k.startswith("set_attention."):
-                head_weights["heads." + k] = tensor
+            else:
+                # Check for namespaced heads: heads.<name>.<param> vs heads.<param>
+                if k.startswith("heads."):
+                    sub = k[len("heads.") :]
+                    parts = sub.split(".", 1)
+                    if len(parts) == 2 and parts[0] not in ("fc1", "fc2", "norm", "scalar", "set_attention", "set_project", "set_output"):
+                        h_name, p_name = parts[0], parts[1]
+                    else:
+                        h_name, p_name = "router", sub
+                else:
+                    h_name, p_name = "router", k
 
+                if h_name not in head_weights_by_name:
+                    head_weights_by_name[h_name] = {}
+                head_weights_by_name[h_name][p_name] = tensor
+
+    # Load backbone
     if backbone_weights:
         model.backbone.load_weights(list(backbone_weights.items()), strict=False)
 
-    if head_weights:
-        model.load_weights(list(head_weights.items()), strict=False)
+    # Instantiate and register heads from main checkpoint
+    for h_name, w_dict in head_weights_by_name.items():
+        h_mod = DeepDecisionHeads(hidden_size=hidden_size, set_head=run_config.get("set_head", "none"))
+        # Map parameters: fc1.weight -> fc1.weight, norm.weight -> norm.weight
+        mapped = [(k if not k.startswith("heads.") else k[6:], v) for k, v in w_dict.items()]
+        h_mod.load_weights(mapped, strict=False)
+        registry.register_head(h_name, h_mod)
 
+    # Ensure router and default always exist
+    if "router" in registry.heads and "default" not in registry.heads:
+        registry.register_head("default", registry.heads["router"])
+    elif "default" in registry.heads and "router" not in registry.heads:
+        registry.register_head("router", registry.heads["default"])
+
+    # 4. Check for external pluggable heads in <checkpoint_dir>/heads/*.safetensors
+    heads_dir = root / "heads"
+    if heads_dir.is_dir():
+        for sf in heads_dir.glob("*.safetensors"):
+            h_name = sf.stem.replace("_head", "")
+            try:
+                plug_weights = {}
+                with safe_open(str(sf), framework="numpy") as pf:
+                    for pk in pf.keys():
+                        t = mx.array(pf.get_tensor(pk))
+                        clean_pk = pk
+                        if clean_pk.startswith(f"heads.{h_name}."):
+                            clean_pk = clean_pk[len(f"heads.{h_name}.") :]
+                        elif clean_pk.startswith("heads."):
+                            clean_pk = clean_pk[len("heads.") :]
+                        plug_weights[clean_pk] = t
+                plug_head = DeepDecisionHeads(hidden_size=hidden_size, set_head=run_config.get("set_head", "none"))
+                plug_head.load_weights(list(plug_weights.items()), strict=False)
+                registry.register_head(h_name, plug_head)
+                print(f"[MultiHeadRegistry] Loaded pluggable head '{h_name}' from {sf.name}", flush=True)
+            except Exception as e:
+                print(f"[MultiHeadRegistry] Failed to load pluggable head from {sf}: {e}", flush=True)
+
+    model.heads = registry
     return model, tokenizer, root, run_config
 
 

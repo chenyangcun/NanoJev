@@ -154,6 +154,12 @@ def evaluate_state_cross_question_sharing(
             cand_mat.append(c + [pad_token_id] * pad_len)
         cand_ids = mx.array(cand_mat, dtype=mx.int32)
 
+        # Resolve appropriate head for this question from registry
+        if hasattr(heads, "resolve_head"):
+            active_head, head_name, routing_reason = heads.resolve_head(qid, q)
+        else:
+            active_head, head_name, routing_reason = heads, "default", "legacy_single_head"
+
         # Broadcast KV cache in batch dimension to K
         for layer_c in prompt_cache:
             layer_c.keys = mx.broadcast_to(layer_c.keys, (K, layer_c.keys.shape[1], layer_c.keys.shape[2], layer_c.keys.shape[3]))
@@ -173,11 +179,11 @@ def evaluate_state_cross_question_sharing(
             h_early = qwen_model.norm(h)
             early_leaves = h_early[row_indices, leaf_indices]
 
-            # Compute early logits
-            if hasattr(heads, "fc1") and hasattr(heads, "fc2") and heads.set_head == "none":
+            # Compute early logits using active_head
+            if hasattr(active_head, "fc1") and hasattr(active_head, "fc2") and active_head.set_head == "none":
                 early_raw = compiled_heads_forward(
-                    early_leaves, heads.norm.weight, heads.norm.bias,
-                    heads.fc1.weight, heads.fc1.bias, heads.fc2.weight, heads.fc2.bias
+                    early_leaves, active_head.norm.weight, active_head.norm.bias,
+                    active_head.fc1.weight, active_head.fc1.bias, active_head.fc2.weight, active_head.fc2.bias
                 )
                 mx.eval(early_raw)
                 z_early = mx.squeeze(early_raw, axis=-1).astype(mx.float32)
@@ -193,6 +199,8 @@ def evaluate_state_cross_question_sharing(
                 # If confidence exceeds threshold, early exit!
                 if ans_early.get("confidence", 0.0) >= early_exit_confidence:
                     ans_early["early_exited_at_layer"] = early_exit_layer
+                    ans_early["used_head"] = head_name
+                    ans_early["routing_mode"] = routing_reason
                     answers[qid] = ans_early
                     cache_pool.backtrack_to_offset(state_offset)
                     continue
@@ -208,7 +216,7 @@ def evaluate_state_cross_question_sharing(
         # Extract leaves at end of each candidate branch
         leaves = cand_hidden[row_indices, leaf_indices]
 
-        # Calculate logits via compiled heads
+        # Calculate logits via compiled active_head
         mock_example = [
             {
                 "id": f"{state_id}:{qid}",
@@ -220,16 +228,16 @@ def evaluate_state_cross_question_sharing(
             }
         ]
 
-        if hasattr(heads, "fc1") and hasattr(heads, "fc2") and heads.set_head == "none":
+        if hasattr(active_head, "fc1") and hasattr(active_head, "fc2") and active_head.set_head == "none":
             raw_scores = compiled_heads_forward(
-                leaves, heads.norm.weight, heads.norm.bias,
-                heads.fc1.weight, heads.fc1.bias, heads.fc2.weight, heads.fc2.bias
+                leaves, active_head.norm.weight, active_head.norm.bias,
+                active_head.fc1.weight, active_head.fc1.bias, active_head.fc2.weight, active_head.fc2.bias
             )
             mx.eval(raw_scores)
             z = mx.squeeze(raw_scores, axis=-1).astype(mx.float32)
             scores = mx.stack([0.0 * z[0], z[0]], axis=0) if q["type"] == "boolean" else z
         else:
-            logits, _ = heads(leaves, mock_example, kmax=len(candidate_ids))
+            logits, _ = active_head(leaves, mock_example, kmax=len(candidate_ids))
             mx.eval(logits)
             scores = logits[0, :len(candidate_ids)]
 
@@ -244,6 +252,8 @@ def evaluate_state_cross_question_sharing(
         probs = mx.softmax(scores / effective_temp, axis=-1).tolist()
         ans = answer_from_probabilities(mock_example[0], probs)
         ans["effective_temperature"] = effective_temp
+        ans["used_head"] = head_name
+        ans["routing_mode"] = routing_reason
         answers[qid] = ans
 
         # BACKTRACK: In-place trim cache back to state_offset and reset batch to 1 for the next question!
