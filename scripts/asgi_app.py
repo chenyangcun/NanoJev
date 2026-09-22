@@ -64,11 +64,13 @@ class NanoJevASGIApp:
         if method in ("GET", "HEAD"):
             if path == "/api/health":
                 has_ane = getattr(self.engine, "ane_agent", None) is not None
+                has_vision = getattr(self.engine, "vision_engine", None) is not None
                 body = json.dumps({
                     "ready": True,
-                    "engine": "nanojev-dual-engine",
+                    "engine": "nanojev-tri-engine",
+                    "vision_available": has_vision,
                     "ane_fastlane_available": has_ane,
-                    "gpu_engine": "mlx-qwen3-8bit",
+                    "gpu_engine": "mlx-qwen35-hybrid",
                     "http_version": scope.get("http_version", "1.1"),
                     "model_loaded_once": True,
                     "provider_calls": 0,

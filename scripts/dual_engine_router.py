@@ -68,6 +68,15 @@ class DualEngineRouter:
                     logger.warning(f"[DualEngine] Could not initialize ANE Engine: {e}. Falling back to 100% GPU.")
                     self.ane_agent = None
 
+        # 3. Initialize Multimodal Vision Engine (Apple MPS Qwen3.5-0.8B)
+        self.vision_engine = None
+        try:
+            from vision_decision_engine import VisionDecisionEngine
+            self.vision_engine = VisionDecisionEngine(checkpoint_dir=gpu_checkpoint_dir)
+            logger.info("[DualEngine] Multimodal Vision Engine loaded successfully on Apple MPS!")
+        except Exception as e:
+            logger.info(f"[DualEngine] Vision Engine not initialized ({e}); continuing with pure-text lanes.")
+
     def can_route_to_ane(self, state_text: str, questions: dict) -> Tuple[bool, str]:
         """Check if request strictly conforms to ANE limitations."""
         if not self.ane_agent:
@@ -116,11 +125,17 @@ class DualEngineRouter:
         return True, "fits_ane_fast_lane"
 
     def predict(self, payload: dict, temperature: float = 0.35) -> dict:
-        """Route request to either ANE or GPU engine."""
+        """Route request to either ANE, Vision Engine, or GPU engine."""
         states = payload.get("states", [])
         if not states:
             from predict_toy_decisions import validate_request
             states = validate_request(payload)
+
+        # 0. Multimodal Vision Lane Check (Apple MPS)
+        if self.vision_engine:
+            has_image = any(self.vision_engine.has_image(st.get("state")) for st in states)
+            if has_image:
+                return self.vision_engine.predict(payload, temperature=temperature)
 
         # Single state check for fast-lane ANE routing
         if len(states) == 1 and self.ane_agent:

@@ -54,9 +54,11 @@ def typesafe_request_to_nanojev(ts_payload: Dict[str, Any]) -> Tuple[Dict[str, A
         raise ValueError("Request body must contain 'state' and 'questions'")
 
     state = ts_payload["state"]
-    # If state is object or array, serialize to string or pass if supported
-    if isinstance(state, (dict, list)):
-        state_repr = json.dumps(state, ensure_ascii=False)
+    # If state is dict, preserve as dict if it contains image or structured fields
+    if isinstance(state, dict):
+        state_repr = dict(state)
+    elif isinstance(state, list):
+        state_repr = list(state)
     elif isinstance(state, str):
         state_repr = state
     else:
