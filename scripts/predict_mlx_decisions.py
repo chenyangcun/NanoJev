@@ -61,7 +61,11 @@ def load_mlx_decision_model(checkpoint_dir: str):
                         pkeys = list(pf.keys())
                         for pk in pkeys:
                             plug_weights[pk] = mx.array(pf.get_tensor(pk))
-                    if any("set_encoder" in k or "proj_in" in k for k in pkeys) or "candidate_set" in sf.name:
+                    if "base_w" in plug_weights or "residual" in sf.name:
+                        from mlx_residual_candidate_set_head import ResidualCandidateSetHead
+                        plug_head = ResidualCandidateSetHead(base_weight=plug_weights.get("base_w"), in_dim=hidden_size)
+                        plug_head.load_weights(list(plug_weights.items()), strict=False)
+                    elif any("set_encoder" in k or "proj_in" in k for k in pkeys) or "candidate_set" in sf.name:
                         from mlx_candidate_set_head import CandidateSetHead
                         plug_head = CandidateSetHead(in_dim=hidden_size, set_dim=256, num_layers=2, num_heads=4)
                         plug_head.load_weights(list(plug_weights.items()), strict=False)
@@ -172,6 +176,10 @@ def load_mlx_decision_model(checkpoint_dir: str):
                 if is_pointer or sf.name.startswith("pointer_") or "pointer" in sf.name:
                     from mlx_pointer_head import PointerHead
                     plug_head = PointerHead(hidden_size=hidden_size, pointer_dim=256)
+                elif "base_w" in plug_weights or "residual" in sf.name:
+                    from mlx_residual_candidate_set_head import ResidualCandidateSetHead
+                    plug_head = ResidualCandidateSetHead(base_weight=plug_weights.get("base_w"), in_dim=hidden_size)
+                    plug_head.load_weights(list(plug_weights.items()), strict=False)
                 elif any("set_encoder" in k or "proj_in" in k for k in pkeys) or "candidate_set" in sf.name:
                     from mlx_candidate_set_head import CandidateSetHead
                     plug_head = CandidateSetHead(in_dim=hidden_size, set_dim=256, num_layers=2, num_heads=4)

@@ -312,9 +312,14 @@ def run_latency_benchmark(model, tokenizer, head):
 
 
 def load_scorer_head(head_path: Path, hidden_size: int = 1024):
-    """Load LinearScorerHead, CandidateSetHead, or DeepDecisionHeads based on checkpoint."""
+    """Load LinearScorerHead, ResidualCandidateSetHead, CandidateSetHead, or DeepDecisionHeads."""
     weights = load_file(str(head_path))
-    if "proj.weight" in weights and len(weights) == 1:
+    if "base_w" in weights:
+        from mlx_residual_candidate_set_head import ResidualCandidateSetHead
+        head = ResidualCandidateSetHead(base_weight=mx.array(weights["base_w"]), in_dim=hidden_size)
+        head.load_weights([(k, mx.array(v)) for k, v in weights.items()], strict=False)
+        print(f"Loaded ResidualCandidateSetHead from: {head_path}", flush=True)
+    elif "proj.weight" in weights and len(weights) == 1:
         head = LinearScorerHead(hidden_size=hidden_size)
         head.proj.weight = mx.array(weights["proj.weight"])
         print(f"Loaded LinearScorerHead from: {head_path}", flush=True)
