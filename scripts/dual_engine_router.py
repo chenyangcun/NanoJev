@@ -79,6 +79,13 @@ class DualEngineRouter:
             return False, "too_many_questions_for_ane"
 
         for qid, q in questions.items():
+            if q.get("head"):
+                return False, f"explicit_head_requested_{q['head']}"
+            qid_lower = qid.lower()
+            if any(k in qid_lower for k in ("complex", "risk", "indep", "tier", "effort")):
+                return False, "router_code_decision_requires_gpu"
+            if any(k in qid_lower for k in ("skill", "tool", "plugin", "shortlist", "winner")) or qid_lower.startswith("verify_"):
+                return False, "skill_selection_requires_gpu"
             qtype = q.get("type")
             if qtype not in ("choice", "noul", "boolean", "score"):
                 return False, f"unsupported_qtype_{qtype}"

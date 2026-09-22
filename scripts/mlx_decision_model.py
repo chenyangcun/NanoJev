@@ -115,7 +115,12 @@ class MLXDecisionModel(nn.Module):
     def __init__(self, backbone, set_head: str = "none"):
         super().__init__()
         self.backbone = backbone
-        hidden_size = backbone.model.embed_tokens.weight.shape[1]
+        if hasattr(backbone, "model") and hasattr(backbone.model, "embed_tokens"):
+            hidden_size = backbone.model.embed_tokens.weight.shape[1]
+        elif hasattr(backbone, "language_model") and hasattr(backbone.language_model.model, "embed_tokens"):
+            hidden_size = backbone.language_model.model.embed_tokens.weight.shape[1]
+        else:
+            hidden_size = 1024
         self.heads = DecisionHeads(hidden_size=hidden_size, set_head=set_head)
 
     def __call__(self, examples: List[dict], pad_token_id: int):

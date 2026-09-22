@@ -142,7 +142,8 @@ def evaluate_state_cross_question_sharing(
 
         # Level 2: Prefill Question instructions on top of State cache (Batch=1)
         q_mat = mx.array([q_tokens], dtype=mx.int32)
-        _ = qwen_model(q_mat, cache=prompt_cache)
+        q_hidden = qwen_model(q_mat, cache=prompt_cache)
+        h_decide = q_hidden[0, -1]
 
         # Level 3: Fork K candidate branches in parallel
         cand_lengths = [len(c) for c in cand_tokens_list]
@@ -228,7 +229,13 @@ def evaluate_state_cross_question_sharing(
             }
         ]
 
-        if hasattr(active_head, "fc1") and hasattr(active_head, "fc2") and active_head.set_head == "none":
+        if hasattr(active_head, "compute_logits") and hasattr(active_head, "q_proj"):
+            # PointerHead: cross-attention dot product between prompt/state query and candidate keys
+            # Use leaves directly or anchor query
+            logits, _ = active_head(leaves, mock_example, kmax=len(candidate_ids))
+            mx.eval(logits)
+            scores = logits[0, :len(candidate_ids)]
+        elif hasattr(active_head, "fc1") and hasattr(active_head, "fc2") and active_head.set_head == "none":
             raw_scores = compiled_heads_forward(
                 leaves, active_head.norm.weight, active_head.norm.bias,
                 active_head.fc1.weight, active_head.fc1.bias, active_head.fc2.weight, active_head.fc2.bias

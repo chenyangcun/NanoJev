@@ -66,6 +66,12 @@ def typesafe_request_to_nanojev(ts_payload: Dict[str, Any]) -> Tuple[Dict[str, A
     if not isinstance(raw_questions, dict) or not raw_questions:
         raise ValueError("Field 'questions' must be a non-empty object")
 
+    req_model = str(ts_payload.get("model", "")).strip().lower()
+    req_head = ts_payload.get("head")
+    # If model is explicitly named after a registered head (e.g. "router", "general", "skill", "agent", "subagent", "memory", "news")
+    if not req_head and req_model in ("router", "general", "skill", "agent", "subagent", "memory", "news"):
+        req_head = req_model
+
     nj_questions = {}
     score_legends = {}
 
@@ -82,27 +88,33 @@ def typesafe_request_to_nanojev(ts_payload: Dict[str, Any]) -> Tuple[Dict[str, A
         else:
             instr_str = str(instructions)
 
+        head_for_q = q.get("head") or req_head
+
         if q_type == "noul":
             nj_q = {"type": "boolean", "instructions": instr_str}
             if "criteria" in q and isinstance(q["criteria"], dict):
                 nj_q["criteria"] = {
                     k: str(v) for k, v in q["criteria"].items() if k in ("true", "false") and v
                 }
+            if head_for_q:
+                nj_q["head"] = str(head_for_q).strip()
             nj_questions[qid] = nj_q
 
         elif q_type == "choice":
             criteria = q.get("criteria")
             if not isinstance(criteria, dict) or len(criteria) < 2:
                 raise ValueError(f"Choice question '{qid}' requires criteria map with >= 2 options")
-            # criteria values can be null in TypeSafe
             cleaned_criteria = {}
             for opt, desc in criteria.items():
                 cleaned_criteria[opt] = desc if desc is not None else opt
-            nj_questions[qid] = {
+            nj_q = {
                 "type": "choice",
                 "instructions": instr_str,
                 "criteria": cleaned_criteria,
             }
+            if head_for_q:
+                nj_q["head"] = str(head_for_q).strip()
+            nj_questions[qid] = nj_q
 
         elif q_type == "score":
             criteria = q.get("criteria")
@@ -110,11 +122,14 @@ def typesafe_request_to_nanojev(ts_payload: Dict[str, Any]) -> Tuple[Dict[str, A
                 raise ValueError(f"Score question '{qid}' requires criteria array with >= 2 levels")
             str_levels = [str(lvl) for lvl in criteria]
             score_legends[qid] = {str(i): lvl for i, lvl in enumerate(str_levels)}
-            nj_questions[qid] = {
+            nj_q = {
                 "type": "score",
                 "instructions": instr_str,
                 "criteria": str_levels,
             }
+            if head_for_q:
+                nj_q["head"] = str(head_for_q).strip()
+            nj_questions[qid] = nj_q
         else:
             raise ValueError(f"Unsupported question type: '{q_type}'")
 

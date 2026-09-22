@@ -55,7 +55,7 @@ def validate_request(payload):
         for qid, question in questions.items():
             if not nonempty_text(qid) or not isinstance(question, dict):
                 raise ValueError("question ID 必须是非空字符串，内容必须为对象")
-            if set(question) - {"type", "instructions", "criteria"}:
+            if set(question) - {"type", "instructions", "criteria", "head"}:
                 raise ValueError(f"{state['id']}:{qid} 含不支持的 question 字段")
             typ = question.get("type")
             if typ not in {"boolean", "choice", "score"} or not nonempty_text(question.get("instructions")):
@@ -136,7 +136,7 @@ def answer_from_probabilities(example, probabilities):
         raise ValueError("模型概率总和不为1")
     best = max(range(len(ids)), key=probabilities.__getitem__)
     result = {"type": example["type"], "probabilities": dict(zip(ids, probabilities))}
-    if example["type"] == "boolean":
+    if example["type"] in ("boolean", "noul"):
         result.update(p_true=probabilities[1], value=bool(best))
     elif example["type"] == "choice":
         result.update(choice=ids[best], value=ids[best])

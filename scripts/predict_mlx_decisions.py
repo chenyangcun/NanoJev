@@ -34,13 +34,57 @@ def load_mlx_decision_model(checkpoint_dir: str):
     root, paths = local_checkpoint_files(checkpoint_dir)
     run_config = read_json(paths["run_config"])
 
+    cfg_file = paths["body_config"] / "config.json" if paths["body_config"].exists() else paths["run_config"]
+    cfg = read_json(cfg_file)
+    is_qwen35 = cfg.get("model_type") == "qwen3_5" or any("Qwen3_5" in str(a) for a in cfg.get("architectures", []))
+
+    if is_qwen35:
+        from mlx_lm import load as load_mlx_lm
+        from mlx_linear_scorer import LinearScorerHead
+        from mlx_deep_heads import DeepDecisionHeads
+        from mlx_multi_head_registry import MultiHeadRegistry
+
+        loaded_model, tokenizer = load_mlx_lm(str(root))
+        model = MLXDecisionModel(loaded_model, set_head="none")
+        model.is_qwen35 = True
+
+        hidden_size = 1024
+        registry = MultiHeadRegistry(hidden_size=hidden_size, default_head_name="general")
+
+        heads_dir = root / "heads"
+        if heads_dir.is_dir():
+            for sf in sorted(heads_dir.glob("*.safetensors")):
+                h_name = sf.stem.replace("_head", "")
+                try:
+                    plug_weights = {}
+                    with safe_open(str(sf), framework="numpy") as pf:
+                        pkeys = list(pf.keys())
+                        for pk in pkeys:
+                            plug_weights[pk] = mx.array(pf.get_tensor(pk))
+                    if any("set_encoder" in k or "proj_in" in k for k in pkeys) or "candidate_set" in sf.name:
+                        from mlx_candidate_set_head import CandidateSetHead
+                        plug_head = CandidateSetHead(in_dim=hidden_size, set_dim=256, num_layers=2, num_heads=4)
+                        plug_head.load_weights(list(plug_weights.items()), strict=False)
+                    elif "proj.weight" in plug_weights and len(plug_weights) == 1:
+                        plug_head = LinearScorerHead(hidden_size=hidden_size)
+                        plug_head.proj.weight = plug_weights["proj.weight"]
+                    else:
+                        plug_head = DeepDecisionHeads(hidden_size=hidden_size)
+                        plug_head.load_weights(list(plug_weights.items()), strict=False)
+                    registry.register_head(h_name, plug_head)
+                    print(f"[MultiHeadRegistry] Loaded pluggable head '{h_name}' ({type(plug_head).__name__}) from {sf.name}", flush=True)
+                except Exception as e:
+                    print(f"[MultiHeadRegistry] Failed to load pluggable head from {sf}: {e}", flush=True)
+
+        model.heads = registry
+        return model, tokenizer, root, run_config
+
     tokenizer = AutoTokenizer.from_pretrained(str(paths["tokenizer"]), local_files_only=True)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     # Load Qwen3 backbone via mlx_lm architecture
     from mlx_lm.models import qwen3
-    cfg = read_json(paths["body_config"] / "config.json")
     if "rope_theta" not in cfg and "rope_parameters" in cfg:
         cfg["rope_theta"] = cfg["rope_parameters"].get("rope_theta", 1000000.0)
 
@@ -76,7 +120,6 @@ def load_mlx_decision_model(checkpoint_dir: str):
                 clean_k = "model." + k[len("backbone.") :]
                 backbone_weights[clean_k] = tensor
             else:
-                # Check for namespaced heads: heads.<name>.<param> vs heads.<param>
                 if k.startswith("heads."):
                     sub = k[len("heads.") :]
                     parts = sub.split(".", 1)
@@ -98,7 +141,6 @@ def load_mlx_decision_model(checkpoint_dir: str):
     # Instantiate and register heads from main checkpoint
     for h_name, w_dict in head_weights_by_name.items():
         h_mod = DeepDecisionHeads(hidden_size=hidden_size, set_head=run_config.get("set_head", "none"))
-        # Map parameters: fc1.weight -> fc1.weight, norm.weight -> norm.weight
         mapped = [(k if not k.startswith("heads.") else k[6:], v) for k, v in w_dict.items()]
         h_mod.load_weights(mapped, strict=False)
         registry.register_head(h_name, h_mod)
@@ -117,7 +159,9 @@ def load_mlx_decision_model(checkpoint_dir: str):
             try:
                 plug_weights = {}
                 with safe_open(str(sf), framework="numpy") as pf:
-                    for pk in pf.keys():
+                    pkeys = list(pf.keys())
+                    is_pointer = any("q_proj" in k or "k_proj" in k for k in pkeys)
+                    for pk in pkeys:
                         t = mx.array(pf.get_tensor(pk))
                         clean_pk = pk
                         if clean_pk.startswith(f"heads.{h_name}."):
@@ -125,10 +169,20 @@ def load_mlx_decision_model(checkpoint_dir: str):
                         elif clean_pk.startswith("heads."):
                             clean_pk = clean_pk[len("heads.") :]
                         plug_weights[clean_pk] = t
-                plug_head = DeepDecisionHeads(hidden_size=hidden_size, set_head=run_config.get("set_head", "none"))
+                if is_pointer or sf.name.startswith("pointer_") or "pointer" in sf.name:
+                    from mlx_pointer_head import PointerHead
+                    plug_head = PointerHead(hidden_size=hidden_size, pointer_dim=256)
+                elif any("set_encoder" in k or "proj_in" in k for k in pkeys) or "candidate_set" in sf.name:
+                    from mlx_candidate_set_head import CandidateSetHead
+                    plug_head = CandidateSetHead(in_dim=hidden_size, set_dim=256, num_layers=2, num_heads=4)
+                elif "proj.weight" in plug_weights and len(plug_weights) == 1:
+                    from mlx_linear_scorer import LinearScorerHead
+                    plug_head = LinearScorerHead(hidden_size=hidden_size)
+                else:
+                    plug_head = DeepDecisionHeads(hidden_size=hidden_size, set_head=run_config.get("set_head", "none"))
                 plug_head.load_weights(list(plug_weights.items()), strict=False)
                 registry.register_head(h_name, plug_head)
-                print(f"[MultiHeadRegistry] Loaded pluggable head '{h_name}' from {sf.name}", flush=True)
+                print(f"[MultiHeadRegistry] Loaded pluggable head '{h_name}' ({type(plug_head).__name__}) from {sf.name}", flush=True)
             except Exception as e:
                 print(f"[MultiHeadRegistry] Failed to load pluggable head from {sf}: {e}", flush=True)
 
@@ -162,7 +216,8 @@ class MLXDecisionPredictor:
         self.inference_calls = 0
 
         # Initialize pre-allocated in-place StaticKVCachePool if prefix sharing enabled
-        if self.enable_prefix_sharing:
+        self.is_qwen35 = getattr(self.model, "is_qwen35", False)
+        if self.enable_prefix_sharing and not self.is_qwen35:
             from cross_question_sharing_engine import StaticKVCachePool
             self.cache_pool = StaticKVCachePool(self.model.backbone.model)
         else:
@@ -175,7 +230,85 @@ class MLXDecisionPredictor:
 
         self.inference_calls += 1
 
-        # Highest-performance path: Cross-Question Hierarchical State Sharing Engine
+        # Qwen3.5 In-Context Marker Scoring Path
+        if self.is_qwen35:
+            from train_qwen35_rlcd import render_dohnuts_question
+            from cross_question_sharing_engine import compute_adaptive_temperature
+
+            outputs = {}
+            total_tokens = 0
+            candidate_paths = 0
+            total_questions = 0
+            marker = "<|fim_suffix|>"
+            marker_id = self.tokenizer.convert_tokens_to_ids(marker)
+
+            for st in states:
+                st_id = st["id"]
+                answers = {}
+                for qid, q in st["questions"].items():
+                    prompt, cands = render_dohnuts_question(st["state"], qid, q, marker=marker)
+                    input_ids = self.tokenizer.encode(prompt)
+                    if len(input_ids) > self.limit:
+                        input_ids = input_ids[: self.limit]
+                    pos = [idx for idx, tid in enumerate(input_ids) if tid == marker_id]
+                    if not pos or len(pos) != len(cands):
+                        cands = cands[: len(pos)]
+                    if not pos:
+                        continue
+
+                    x = mx.array([input_ids], dtype=mx.int32)
+                    hidden = self.model.backbone.language_model.model(x)
+                    marker_h = hidden[0, mx.array(pos)].astype(mx.float32)
+                    mx.eval(marker_h)
+
+                    active_head, head_name, reason = self.model.heads.resolve_head(qid, q)
+                    k = len(cands)
+                    mock_ex = [{"id": f"{st_id}:{qid}", "type": q["type"], "candidate_ids": cands, "leaf_tokens": [[1]] * k}]
+                    logits, _ = active_head(marker_h, mock_ex, kmax=k)
+                    mx.eval(logits)
+                    scores = logits[0, :k] if logits.ndim > 1 else logits[:k]
+
+                    if self.enable_adaptive_temp:
+                        eff_temp = compute_adaptive_temperature(scores, base_temp=float(temperature))
+                    else:
+                        eff_temp = float(temperature)
+
+                    probs = mx.softmax(scores / eff_temp, axis=-1).tolist()
+                    ans = answer_from_probabilities(mock_ex[0], probs)
+                    ans["effective_temperature"] = eff_temp
+                    ans["used_head"] = head_name
+                    ans["routing_mode"] = reason
+                    answers[qid] = ans
+
+                    total_tokens += len(input_ids)
+                    candidate_paths += k
+                    total_questions += 1
+
+                outputs[st_id] = {"id": st_id, "answers": answers}
+
+            return {
+                "schema_version": "openjev-mlx-inference-v1",
+                "checkpoint": {
+                    "directory": str(self.root),
+                    "base_model": "Qwen3.5-0.8B",
+                    "architecture": "qwen3_5-hybrid-in-context",
+                },
+                "temperature": {"value": float(temperature), "adaptive": self.enable_adaptive_temp},
+                "execution": {
+                    "engine": "mlx-qwen35-in-context-marker",
+                    "device": str(mx.default_device()),
+                    "states": len(states),
+                    "questions": total_questions,
+                    "candidate_paths": candidate_paths,
+                    "total_input_tokens": total_tokens,
+                    "early_exit_layer": 0,
+                    "autoregressive_decode_steps": 0,
+                    "inference_call_index": self.inference_calls,
+                },
+                "states": list(outputs.values()),
+            }
+
+        # Highest-performance path: Cross-Question Hierarchical State Sharing Engine (Qwen3)
         if self.enable_prefix_sharing:
             from cross_question_sharing_engine import evaluate_state_cross_question_sharing
             outputs = {}

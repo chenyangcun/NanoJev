@@ -105,20 +105,29 @@ class NanoJevASGIApp:
                     break
 
             if path == "/v1/systemone":
-                await self.handle_typesafe_systemone(send, bytes(body))
+                await self.handle_typesafe_systemone(scope, send, bytes(body))
                 return
 
             if path == "/api/evaluate":
-                await self.handle_api_evaluate(send, bytes(body))
+                await self.handle_api_evaluate(scope, send, bytes(body))
                 return
 
             await self.send_response(send, 404, b'{"error":"Unknown endpoint"}', "application/json; charset=utf-8")
             return
 
-    async def handle_typesafe_systemone(self, send, body_bytes: bytes):
+    async def handle_typesafe_systemone(self, scope, send, body_bytes: bytes):
         try:
             ts_req = json.loads(body_bytes.decode("utf-8"))
             temp = float(ts_req.get("temperature", self.default_temperature))
+
+            # Support HTTP Request Header: X-Decision-Head or X-NanoJev-Head
+            headers_dict = {k.lower(): v for k, v in scope.get("headers", [])}
+            head_hdr = headers_dict.get(b"x-decision-head") or headers_dict.get(b"x-nanojev-head")
+            if head_hdr:
+                head_str = head_hdr.decode("utf-8").strip()
+                if head_str:
+                    ts_req.setdefault("head", head_str)
+
             nj_payload, meta = typesafe_request_to_nanojev(ts_req)
             # MLX streams are thread-local; execute directly on main event loop thread
             nj_res = self.engine.predict(nj_payload, temperature=temp)
@@ -132,13 +141,20 @@ class NanoJevASGIApp:
             err = json.dumps({"error": f"Internal error: {str(exc)}"}).encode("utf-8")
             await self.send_response(send, 500, err, "application/json; charset=utf-8")
 
-    async def handle_api_evaluate(self, send, body_bytes: bytes):
+    async def handle_api_evaluate(self, scope, send, body_bytes: bytes):
         try:
             payload = json.loads(
                 body_bytes.decode("utf-8"),
                 object_pairs_hook=unique_object,
                 parse_constant=reject_nonfinite,
             )
+            headers_dict = {k.lower(): v for k, v in scope.get("headers", [])}
+            head_hdr = headers_dict.get(b"x-decision-head") or headers_dict.get(b"x-nanojev-head")
+            if head_hdr:
+                head_str = head_hdr.decode("utf-8").strip()
+                if head_str:
+                    payload.setdefault("head", head_str)
+
             states = validate_request(payload)
             t0 = time.perf_counter()
             result = self.engine.predict(payload)
