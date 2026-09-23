@@ -64,6 +64,24 @@ class NanoJev4BASGIApp:
         self.default_temperature = default_temperature
         self.allow_h1_fallback = allow_h1_fallback
 
+        # Solution 1: 0-Token Decision Heads Adapter
+        self.router_heads = None
+        self.head_label_maps = None
+        heads_path = Path(checkpoint_dir) / "heads" / "router_heads.safetensors"
+        if heads_path.exists():
+            try:
+                from mlx.utils import tree_unflatten
+                from train_4b_heads import RouterMultiHeads, LABEL_MAPS
+                self.router_heads = RouterMultiHeads(in_features=2560, hidden_dim=256)
+                weights = mx.load(str(heads_path))
+                self.router_heads.update(tree_unflatten(list(weights.items())))
+                mx.eval(self.router_heads.parameters())
+                self.head_label_maps = LABEL_MAPS
+                print(f"[NanoJev-4B] Loaded 0-Token Specialized Router Decision Heads from {heads_path}!", flush=True)
+            except Exception as e:
+                print(f"[NanoJev-4B] Notice: router heads not loaded ({e}); continuing with SemIf direct lane.", flush=True)
+                self.router_heads = None
+
         # P0: Multi-State LRU Cache
         self.lru_capacity = lru_capacity
         self.lru_cache: OrderedDict[str, any] = OrderedDict()
@@ -519,15 +537,16 @@ class NanoJev4BASGIApp:
 
         # P0: Multi-State LRU Cache Lookup
         if state_hash in self.lru_cache:
-            base_cache = self.lru_cache.pop(state_hash)
-            self.lru_cache[state_hash] = base_cache
+            base_cache, last_vec = self.lru_cache.pop(state_hash)
+            self.lru_cache[state_hash] = (base_cache, last_vec)
             self.cache_hits += 1
             cache_hit = True
         else:
             cache = make_prompt_cache(self.model)
             x_prefix = mx.array([prefix_tokens], dtype=mx.int32)
-            self.model(x_prefix, cache=cache)
-            mx.eval([e.state for e in cache])
+            h = self.inner_model(x_prefix, cache=cache)
+            last_vec = h[0, -1, :]
+            mx.eval([e.state for e in cache], last_vec)
             mx.synchronize()
 
             if len(self.lru_cache) >= self.lru_capacity:
@@ -535,8 +554,65 @@ class NanoJev4BASGIApp:
                 del oldest_val
                 mx.metal.clear_cache()
 
-            self.lru_cache[state_hash] = cache
+            self.lru_cache[state_hash] = (cache, last_vec)
             base_cache = cache
+
+        # Solution 1: 0-Token Decision Heads Lane
+        def _options_match_head(qk, q):
+            if not self.head_label_maps or qk not in self.head_label_maps:
+                return False
+            if q.get("type") in ("noul", "boolean"):
+                return True
+            crit = q.get("criteria", {})
+            mapping = self.head_label_maps[qk]
+            crit_keys = list(crit.keys()) if isinstance(crit, dict) else [str(i) for i in range(len(crit))]
+            return bool(crit_keys and all(k.lower() in mapping for k in crit_keys))
+
+        can_use_heads = (
+            self.router_heads is not None
+            and all(_options_match_head(qk, q) for qk, q in raw_questions.items())
+        )
+
+        if can_use_heads:
+            answers = {}
+            pred_logits = self.router_heads(last_vec)
+            mx.eval(pred_logits)
+
+            for qid, q in raw_questions.items():
+                qtype = q.get("type", "choice")
+                crit = q.get("criteria", {})
+                logits = pred_logits[qid]
+                mapping = self.head_label_maps[qid]
+
+                if qtype in ("noul", "boolean"):
+                    probs = mx.softmax(logits / max(1e-4, temperature)).tolist()
+                    p_yes = round(probs[1], 4)
+                    answers[qid] = {
+                        "type": "noul",
+                        "noul": p_yes,
+                        "confidence": round(max(p_yes, 1.0 - p_yes), 4),
+                        "probabilities": {"yes": p_yes, "no": round(1.0 - p_yes, 4)},
+                    }
+                else:
+                    crit_keys = list(crit.keys()) if isinstance(crit, dict) else [str(i) for i in range(len(crit))]
+                    indices = [mapping.index(k) for k in crit_keys if k in mapping]
+                    if len(indices) == len(crit_keys) and len(indices) > 0:
+                        sub_logits = logits[mx.array(indices)]
+                        probs_list = mx.softmax(sub_logits / max(1e-4, temperature)).tolist()
+                        probs = {crit_keys[j]: round(probs_list[j], 4) for j in range(len(crit_keys))}
+                    else:
+                        probs_list = mx.softmax(logits / max(1e-4, temperature)).tolist()
+                        probs = {mapping[j]: round(probs_list[j], 4) for j in range(len(mapping))}
+
+                    pred = max(probs.keys(), key=lambda k: probs[k])
+                    answers[qid] = {
+                        "type": "choice",
+                        "choice": pred,
+                        "probabilities": probs,
+                        "confidence": probs[pred],
+                    }
+
+            return answers, len(prefix_tokens), cache_hit
 
         answers = {}
         total_tokens = len(prefix_tokens)
