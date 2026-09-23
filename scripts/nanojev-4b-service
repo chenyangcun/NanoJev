@@ -3,7 +3,7 @@
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON="/Users/chenyc/work/NanoJev/.venv/bin/python3"
-SCRIPT="$BASE_DIR/scripts/serve_4b.py"
+SCRIPT="$BASE_DIR/scripts/serve_hypercorn_4b.py"
 LOG="$BASE_DIR/serve_4b.log"
 PORT=8770
 MODEL_DIR="$BASE_DIR/checkpoints/qwen35_4b_oq4e_fp16"
@@ -17,9 +17,9 @@ start() {
         echo "NanoJev-4B is already running on port $PORT."
         return 0
     fi
-    echo "Starting NanoJev-4B (oQ4e-FP16) on port $PORT..."
+    echo "Starting NanoJev-4B (oQ4e-FP16, h2c-only) on port $PORT..."
     cd "$BASE_DIR"
-    nohup "$PYTHON" "$SCRIPT" --checkpoint-dir "$MODEL_DIR" --port "$PORT" > "$LOG" 2>&1 &
+    nohup "$PYTHON" "$SCRIPT" --checkpoint-dir "$MODEL_DIR" --port "$PORT" --http h2c > "$LOG" 2>&1 &
     sleep 3
     if is_running; then
         echo "NanoJev-4B started successfully! (PID: $(lsof -t -i :$PORT))"
@@ -37,13 +37,14 @@ stop() {
         return 0
     fi
     echo "Stopping NanoJev-4B on port $PORT..."
+    pkill -f "serve_hypercorn_4b" || true
     pkill -f "$SCRIPT" || true
     sleep 2
     if ! is_running; then
         echo "NanoJev-4B stopped."
     else
         echo "Force killing remaining process..."
-        fuser -k $PORT/tcp 2>/dev/null || true
+        kill -9 $(lsof -t -i :$PORT) 2>/dev/null || true
     fi
 }
 

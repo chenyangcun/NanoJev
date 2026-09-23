@@ -25,7 +25,24 @@ def main():
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--calls", type=int, default=20)
+    parser.add_argument("--body", default=None, help="Path to a JSON request body file (default: small built-in decision)")
     args = parser.parse_args()
+
+    global BODY_BYTES
+    if args.body:
+        with open(args.body, "rb") as f:
+            BODY_BYTES = f.read()
+    else:
+        BODY_BYTES = json.dumps({
+            "state": {"user_task": "Check disk usage on the server."},
+            "questions": {
+                "decision": {
+                    "type": "choice",
+                    "instructions": "Which tool should be used?",
+                    "criteria": {"bash": "Run a shell command", "editor": "Open text editor", "browser": "Open web browser"},
+                }
+            },
+        }).encode("utf-8")
 
     url = f"http://{args.host}:{args.port}/v1/systemone"
     print(f"Running End-to-End Speed Benchmark against {url}...\n")
@@ -102,8 +119,23 @@ def main():
         sock.close()
         return latencies
 
-    _ = run_h1_short(2)
+    _ = run_h1_short(2) if args.port != 8770 else None
     n = args.calls
+
+    if args.port == 8770:
+        # h2c-only endpoint: HTTP/1.1 lanes are not available
+        print(f"3. Testing Native HTTP/2.0 Binary Stream Multiplexing ({n} calls)...")
+        h2_stream = run_h2_native(n)
+
+        print("\n" + "=" * 75)
+        print("🚀 HTTP/2 h2c-only Benchmark Report")
+        print("=" * 75)
+        print(f"{'协议':<30} | {'中位延迟':<10} | {'平均延迟':<10} | {'P95 延迟':<10}")
+        print("-" * 75)
+        print(f"{'HTTP/2.0 h2c (流复用)':<30} | {statistics.median(h2_stream):<8.1f}ms | {statistics.mean(h2_stream):<8.1f}ms | {sorted(h2_stream)[int(n*0.95)]:<8.1f}ms")
+        print("=" * 75)
+        return
+
     print(f"1. Testing HTTP/1.1 Short Connection (Connection: close, {n} calls)...")
     h1_short = run_h1_short(n)
 
