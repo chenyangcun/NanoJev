@@ -26,10 +26,10 @@ def main():
     parser.add_argument("--lru-capacity", type=int, default=8, help="Number of distinct state KV caches to retain in LRU (default: 8)")
     parser.add_argument(
         "--http",
-        default="h2c",
+        default="h2c-preferred",
         choices=("h2c", "h2c-preferred", "h1"),
         help="h2c = HTTP/2 cleartext only (rejects HTTP/1.1); "
-             "h2c-preferred = HTTP/2 with HTTP/1.1 fallback; "
+             "h2c-preferred = HTTP/2 with HTTP/1.1 fallback (default); "
              "h1 = HTTP/1.1 only",
     )
     args = parser.parse_args()

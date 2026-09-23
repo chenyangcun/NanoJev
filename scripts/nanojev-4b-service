@@ -17,9 +17,9 @@ start() {
         echo "NanoJev-4B is already running on port $PORT."
         return 0
     fi
-    echo "Starting NanoJev-4B (oQ4e-FP16, h2c-only) on port $PORT..."
+    echo "Starting NanoJev-4B (oQ4e-FP16, h2c-preferred) on port $PORT..."
     cd "$BASE_DIR"
-    nohup "$PYTHON" "$SCRIPT" --checkpoint-dir "$MODEL_DIR" --port "$PORT" --http h2c > "$LOG" 2>&1 &
+    nohup "$PYTHON" "$SCRIPT" --checkpoint-dir "$MODEL_DIR" --port "$PORT" --http h2c-preferred > "$LOG" 2>&1 &
     sleep 3
     if is_running; then
         echo "NanoJev-4B started successfully! (PID: $(lsof -t -i :$PORT))"

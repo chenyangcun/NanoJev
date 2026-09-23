@@ -744,8 +744,6 @@ class NanoJev4BASGIApp:
                     answers[qid] = {
                         "type": "noul",
                         "noul": 0.0,
-                        "confidence": 1.0,
-                        "probabilities": {"yes": 0.0, "no": 1.0},
                     }
                     continue
 
@@ -760,8 +758,6 @@ class NanoJev4BASGIApp:
                     answers[qid] = {
                         "type": "noul",
                         "noul": p_yes,
-                        "confidence": round(max(p_yes, 1.0 - p_yes), 4),
-                        "probabilities": {"yes": p_yes, "no": round(1.0 - p_yes, 4)},
                     }
                 elif qtype == "score":
                     probs_list = mx.softmax(logits / max(1e-4, temperature)).tolist()
@@ -788,12 +784,18 @@ class NanoJev4BASGIApp:
                         probs_list = mx.softmax(logits / max(1e-4, temperature)).tolist()
                         probs = {mapping[j]: round(probs_list[j], 4) for j in range(len(mapping))}
 
+                    # Ensure probabilities sum exactly to 1.0
+                    sum_p = sum(probs.values())
+                    if sum_p > 0:
+                        first_k = next(iter(probs))
+                        probs[first_k] = round(probs[first_k] + (1.0 - sum_p), 4)
+
                     pred = max(probs.keys(), key=lambda k: probs[k])
                     answers[qid] = {
                         "type": "choice",
                         "choice": pred,
                         "probabilities": probs,
-                        "confidence": probs[pred],
+                        "confidence": round(probs[pred], 4),
                     }
 
             return answers, len(prefix_tokens), delta_token_count, hit_type
