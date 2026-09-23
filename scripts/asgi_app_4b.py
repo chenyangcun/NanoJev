@@ -64,6 +64,10 @@ class NanoJev4BASGIApp:
         self.default_temperature = default_temperature
         self.allow_h1_fallback = allow_h1_fallback
 
+        # Feature 4: CPU-GPU Pipeline Overlapping Executor
+        from concurrent.futures import ThreadPoolExecutor
+        self._cpu_preprocess_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="nj-cpu-prep")
+
         # Solution 1: 0-Token Decision Heads Adapter (Router + Webpage Memory Review)
         self.router_heads = None
         self.memory_heads = None
@@ -217,6 +221,7 @@ class NanoJev4BASGIApp:
                     "prefix_sharing": True,
                     "radix_prefix_cache": True,
                     "static_system_pinned": True,
+                    "pipeline_overlapping": True,
                     "static_system_tokens": len(self.static_system_tokens),
                     "lru_cache_slots": len(self.lru_cache),
                     "lru_cache_capacity": self.lru_capacity,
@@ -452,11 +457,17 @@ class NanoJev4BASGIApp:
             session_hdr = headers_dict.get(b"x-session-id")
             session_id = session_hdr.decode("utf-8", errors="ignore").strip() if session_hdr else None
 
-            # P0: Non-blocking async queue - event loop remains responsive
+            # Feature 4: Stage 1 (CPU Thread Pool) - Concurrently pre-process, tokenize, truncate, and hash
+            loop = asyncio.get_running_loop()
+            state_text, prefix_tokens, state_hash = await loop.run_in_executor(
+                self._cpu_preprocess_pool, self._cpu_preprocess, state, raw_questions
+            )
+
+            # Feature 4: Stage 2 (GPU Pipeline Lock) - Immediate tensor execution without waiting for CPU preparation
             async with self._inference_lock:
                 t0_infer = time.perf_counter()
                 answers, total_tokens, delta_tokens, hit_type = await asyncio.to_thread(
-                    self.predict_multi_questions, state, raw_questions, temperature=temp, session_id=session_id
+                    self._gpu_inference, state_text, prefix_tokens, state_hash, raw_questions, temperature=temp, session_id=session_id
                 )
                 infer_ms = (time.perf_counter() - t0_infer) * 1000
 
@@ -552,6 +563,15 @@ class NanoJev4BASGIApp:
             err = json.dumps({"error": f"Internal error: {str(exc)}"}).encode("utf-8")
             await self.send_response(send, 500, err, "application/json; charset=utf-8")
 
+    def _cpu_preprocess(self, state, raw_questions: dict):
+        """CPU Worker stage: stringify, format, BPE tokenize, truncate, and hash (runs concurrently while GPU is busy)."""
+        state_text = json.dumps(state, ensure_ascii=False) if isinstance(state, (dict, list)) else str(state)
+        prefix_text = f"<|im_start|>system\n{DIRECT_SYSTEM}<|im_end|>\n<|im_start|>user\nEvidence:\n{state_text}\n\n"
+        raw_tokens = self.tokenizer.encode(prefix_text, add_special_tokens=False)
+        prefix_tokens = self._truncate_prefix_tokens(raw_tokens)
+        state_hash = hashlib.sha256(prefix_text.encode("utf-8")).hexdigest()
+        return state_text, prefix_tokens, state_hash
+
     def _fast_clone_cache(self, cache):
         """P1: Fast zero-copy wrapper for branching prompt cache across questions."""
         new_c = []
@@ -581,15 +601,9 @@ class NanoJev4BASGIApp:
         tail = tokens[-TAIL_PRESERVE_TOKENS:]
         return head + tail
 
-    def predict_multi_questions(
-        self, state, raw_questions: dict, temperature: float = 1.0, session_id: Optional[str] = None
+    def _gpu_inference(
+        self, state_text: str, prefix_tokens: list[int], state_hash: str, raw_questions: dict, temperature: float = 1.0, session_id: Optional[str] = None
     ) -> Tuple[dict, int, int, str]:
-        state_text = json.dumps(state, ensure_ascii=False) if isinstance(state, (dict, list)) else str(state)
-        prefix_text = f"<|im_start|>system\n{DIRECT_SYSTEM}<|im_end|>\n<|im_start|>user\nEvidence:\n{state_text}\n\n"
-        raw_tokens = self.tokenizer.encode(prefix_text, add_special_tokens=False)
-        prefix_tokens = self._truncate_prefix_tokens(raw_tokens)
-
-        state_hash = hashlib.sha256(prefix_text.encode("utf-8")).hexdigest()
         self.total_requests += 1
 
         # Multi-Tier Prefix & Session Cache Resolution
@@ -888,6 +902,11 @@ class NanoJev4BASGIApp:
                 }
 
         return answers, total_tokens, delta_token_count, hit_type
+
+    def predict_multi_questions(self, state, raw_questions: dict, temperature: float = 1.0, session_id: Optional[str] = None):
+        """Backward compatible synchronous method."""
+        state_text, prefix_tokens, state_hash = self._cpu_preprocess(state, raw_questions)
+        return self._gpu_inference(state_text, prefix_tokens, state_hash, raw_questions, temperature=temperature, session_id=session_id)
 
     async def send_response(
         self,
