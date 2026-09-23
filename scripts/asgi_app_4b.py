@@ -82,11 +82,29 @@ class NanoJev4BASGIApp:
                 print(f"[NanoJev-4B] Notice: router heads not loaded ({e}); continuing with SemIf direct lane.", flush=True)
                 self.router_heads = None
 
-        # P0: Multi-State LRU Cache
+        # Lock Metal wired memory to prevent swapping and eliminate tail latency
+        if mx.metal.is_available():
+            try:
+                mx.set_wired_limit(mx.device_info()["max_recommended_working_set_size"])
+            except Exception:
+                pass
+
+        # Feature 2: Static System Prompt Pinning (Pre-baking in Unified Memory)
+        self.static_system_prefix = f"<|im_start|>system\n{DIRECT_SYSTEM}<|im_end|>\n<|im_start|>user\nEvidence:\n"
+        self.static_system_tokens = self.tokenizer.encode(self.static_system_prefix, add_special_tokens=False)
+        self.static_system_cache = make_prompt_cache(self.model)
+        self.inner_model(mx.array([self.static_system_tokens], dtype=mx.int32), cache=self.static_system_cache)
+        mx.eval([e.state for e in self.static_system_cache])
+        print(f"[NanoJev-4B] Static System Prompt pinned in memory ({len(self.static_system_tokens)} tokens)!", flush=True)
+
+        # Feature 1 & 3: Radix / Common Prefix Tree & Session-Affinity KV Cache
         self.lru_capacity = lru_capacity
-        self.lru_cache: OrderedDict[str, any] = OrderedDict()
+        self.lru_cache: OrderedDict[str, dict] = OrderedDict()  # state_hash -> {tokens, cache, last_vec, session_id}
+        self.session_index: dict[str, str] = {}  # session_id -> state_hash
         self.total_requests = 0
-        self.cache_hits = 0
+        self.cache_hits_exact = 0
+        self.cache_hits_prefix = 0
+        self.cache_hits_system = 0
         self.start_time = time.time()
 
         # P0: Async Event Loop Decoupling Lock
@@ -168,7 +186,8 @@ class NanoJev4BASGIApp:
 
         if method in ("GET", "HEAD"):
             if path == "/api/health":
-                hit_rate = (self.cache_hits / self.total_requests) if self.total_requests > 0 else 0.0
+                total_hits = self.cache_hits_exact + self.cache_hits_prefix + self.cache_hits_system
+                hit_rate = (total_hits / self.total_requests) if self.total_requests > 0 else 0.0
                 body = json.dumps({
                     "ready": True,
                     "model": "nanojev-4b",
@@ -177,8 +196,15 @@ class NanoJev4BASGIApp:
                     "quantization": "oq4e-fp16",
                     "http_version": http_version,
                     "prefix_sharing": True,
+                    "radix_prefix_cache": True,
+                    "static_system_pinned": True,
+                    "static_system_tokens": len(self.static_system_tokens),
                     "lru_cache_slots": len(self.lru_cache),
                     "lru_cache_capacity": self.lru_capacity,
+                    "active_sessions": len(self.session_index),
+                    "exact_cache_hits": self.cache_hits_exact,
+                    "prefix_cache_hits": self.cache_hits_prefix,
+                    "system_prebaked_hits": self.cache_hits_system,
                     "cache_hit_rate": round(hit_rate, 4),
                     "total_requests": self.total_requests,
                     "vision_available": self.vision_engine is not None,
@@ -401,11 +427,16 @@ class NanoJev4BASGIApp:
                     await self.send_response(send, 500, err, "application/json; charset=utf-8")
                 return
 
+            # Session affinity header
+            headers_dict = {k.lower(): v for k, v in scope.get("headers", [])}
+            session_hdr = headers_dict.get(b"x-session-id")
+            session_id = session_hdr.decode("utf-8", errors="ignore").strip() if session_hdr else None
+
             # P0: Non-blocking async queue - event loop remains responsive
             async with self._inference_lock:
                 t0_infer = time.perf_counter()
-                answers, total_tokens, cache_hit = await asyncio.to_thread(
-                    self.predict_multi_questions, state, raw_questions, temperature=temp
+                answers, total_tokens, delta_tokens, hit_type = await asyncio.to_thread(
+                    self.predict_multi_questions, state, raw_questions, temperature=temp, session_id=session_id
                 )
                 infer_ms = (time.perf_counter() - t0_infer) * 1000
 
@@ -436,9 +467,12 @@ class NanoJev4BASGIApp:
                 "response_bytes": len(resp_bytes),
                 "total_ms": round(total_ms, 1),
                 "infer_ms": round(infer_ms, 1),
-                "cache_hit": cache_hit,
-                "prefill_tokens": total_tokens,
-                "lane": "metal-gpu-4b",
+                "cache_hit": hit_type != "miss",
+                "cache_hit_type": hit_type,
+                "prefill_tokens": delta_tokens,
+                "total_tokens": total_tokens,
+                "session_id": session_id,
+                "lane": "0-token-heads",
                 "questions_count": len(raw_questions),
                 "questions": list(raw_questions.keys()),
                 "decisions": decisions_summary,
@@ -449,10 +483,13 @@ class NanoJev4BASGIApp:
 
             extra_headers = [
                 (b"x-inference-time-ms", f"{infer_ms:.1f}".encode("utf-8")),
-                (b"x-cache-hit", b"1" if cache_hit else b"0"),
-                (b"x-prefill-tokens", str(total_tokens).encode("utf-8")),
-                (b"x-lane", b"metal-gpu-4b"),
+                (b"x-cache-hit", hit_type.encode("utf-8")),
+                (b"x-prefill-tokens", str(delta_tokens).encode("utf-8")),
+                (b"x-total-tokens", str(total_tokens).encode("utf-8")),
+                (b"x-lane", b"0-token-heads"),
             ]
+            if session_id:
+                extra_headers.append((b"x-session-id", session_id.encode("utf-8")))
             await self.send_response(send, 200, resp_bytes, "application/json; charset=utf-8", extra_headers=extra_headers)
         except (ValueError, TypeError, KeyError) as exc:
             total_ms = (time.perf_counter() - t0_req) * 1000
@@ -524,38 +561,131 @@ class NanoJev4BASGIApp:
         tail = tokens[-TAIL_PRESERVE_TOKENS:]
         return head + tail
 
-    def predict_multi_questions(self, state, raw_questions: dict, temperature: float = 1.0) -> Tuple[dict, int, bool]:
+    def predict_multi_questions(
+        self, state, raw_questions: dict, temperature: float = 1.0, session_id: Optional[str] = None
+    ) -> Tuple[dict, int, int, str]:
         state_text = json.dumps(state, ensure_ascii=False) if isinstance(state, (dict, list)) else str(state)
         prefix_text = f"<|im_start|>system\n{DIRECT_SYSTEM}<|im_end|>\n<|im_start|>user\nEvidence:\n{state_text}\n\n"
         raw_tokens = self.tokenizer.encode(prefix_text, add_special_tokens=False)
         prefix_tokens = self._truncate_prefix_tokens(raw_tokens)
 
         state_hash = hashlib.sha256(prefix_text.encode("utf-8")).hexdigest()
-
         self.total_requests += 1
-        cache_hit = False
 
-        # P0: Multi-State LRU Cache Lookup
+        # Multi-Tier Prefix & Session Cache Resolution
+        # Tier 1: Exact Match (Full Cache Hit)
         if state_hash in self.lru_cache:
-            base_cache, last_vec = self.lru_cache.pop(state_hash)
-            self.lru_cache[state_hash] = (base_cache, last_vec)
-            self.cache_hits += 1
-            cache_hit = True
+            entry = self.lru_cache.pop(state_hash)
+            self.lru_cache[state_hash] = entry  # Move to MRU
+            base_cache = entry["cache"]
+            last_vec = entry["last_vec"]
+            self.cache_hits_exact += 1
+            hit_type = "exact"
+            delta_token_count = 0
         else:
-            cache = make_prompt_cache(self.model)
-            x_prefix = mx.array([prefix_tokens], dtype=mx.int32)
-            h = self.inner_model(x_prefix, cache=cache)
-            last_vec = h[0, -1, :]
-            mx.eval([e.state for e in cache], last_vec)
-            mx.synchronize()
+            best_entry = None
+            best_len = 0
 
-            if len(self.lru_cache) >= self.lru_capacity:
-                _oldest_key, oldest_val = self.lru_cache.popitem(last=False)
-                del oldest_val
-                mx.metal.clear_cache()
+            # 1. Prioritize Session Affinity
+            if session_id and session_id in self.session_index:
+                prev_hash = self.session_index[session_id]
+                if prev_hash in self.lru_cache:
+                    cand = self.lru_cache[prev_hash]
+                    c_toks = cand["tokens"]
+                    if len(c_toks) < len(prefix_tokens) and prefix_tokens[:len(c_toks)] == c_toks:
+                        best_entry = cand
+                        best_len = len(c_toks)
 
-            self.lru_cache[state_hash] = (cache, last_vec)
-            base_cache = cache
+            # 2. If no session match or shorter, search LRU for longest common prefix
+            if not best_entry:
+                for cand_hash, cand in reversed(self.lru_cache.items()):
+                    c_toks = cand["tokens"]
+                    if len(c_toks) > best_len and len(c_toks) < len(prefix_tokens):
+                        if prefix_tokens[:len(c_toks)] == c_toks:
+                            best_entry = cand
+                            best_len = len(c_toks)
+
+            # Tier 2: Radix Prefix Incremental Match
+            if best_entry and best_len >= len(self.static_system_tokens):
+                delta = prefix_tokens[best_len:]
+                cache = self._fast_clone_cache(best_entry["cache"])
+                h = self.inner_model(mx.array([delta], dtype=mx.int32), cache=cache)
+                last_vec = h[0, -1, :]
+                mx.eval([e.state for e in cache], last_vec)
+                mx.synchronize()
+
+                entry = {
+                    "tokens": prefix_tokens,
+                    "cache": cache,
+                    "last_vec": last_vec,
+                    "session_id": session_id,
+                }
+                if len(self.lru_cache) >= self.lru_capacity:
+                    _evicted_hash, evicted = self.lru_cache.popitem(last=False)
+                    del evicted
+                    mx.metal.clear_cache()
+
+                self.lru_cache[state_hash] = entry
+                if session_id:
+                    self.session_index[session_id] = state_hash
+                base_cache = cache
+                self.cache_hits_prefix += 1
+                hit_type = "prefix"
+                delta_token_count = len(delta)
+
+            # Tier 3: Static System Prompt Pinning Fallback
+            elif prefix_tokens[:len(self.static_system_tokens)] == self.static_system_tokens:
+                delta = prefix_tokens[len(self.static_system_tokens):]
+                cache = self._fast_clone_cache(self.static_system_cache)
+                h = self.inner_model(mx.array([delta], dtype=mx.int32), cache=cache)
+                last_vec = h[0, -1, :]
+                mx.eval([e.state for e in cache], last_vec)
+                mx.synchronize()
+
+                entry = {
+                    "tokens": prefix_tokens,
+                    "cache": cache,
+                    "last_vec": last_vec,
+                    "session_id": session_id,
+                }
+                if len(self.lru_cache) >= self.lru_capacity:
+                    _evicted_hash, evicted = self.lru_cache.popitem(last=False)
+                    del evicted
+                    mx.metal.clear_cache()
+
+                self.lru_cache[state_hash] = entry
+                if session_id:
+                    self.session_index[session_id] = state_hash
+                base_cache = cache
+                self.cache_hits_system += 1
+                hit_type = "system"
+                delta_token_count = len(delta)
+
+            # Tier 4: Cold Full Fallback
+            else:
+                cache = make_prompt_cache(self.model)
+                h = self.inner_model(mx.array([prefix_tokens], dtype=mx.int32), cache=cache)
+                last_vec = h[0, -1, :]
+                mx.eval([e.state for e in cache], last_vec)
+                mx.synchronize()
+
+                entry = {
+                    "tokens": prefix_tokens,
+                    "cache": cache,
+                    "last_vec": last_vec,
+                    "session_id": session_id,
+                }
+                if len(self.lru_cache) >= self.lru_capacity:
+                    _evicted_hash, evicted = self.lru_cache.popitem(last=False)
+                    del evicted
+                    mx.metal.clear_cache()
+
+                self.lru_cache[state_hash] = entry
+                if session_id:
+                    self.session_index[session_id] = state_hash
+                base_cache = cache
+                hit_type = "miss"
+                delta_token_count = len(prefix_tokens)
 
         # Solution 1: 0-Token Decision Heads Lane
         def _options_match_head(qk, q):
@@ -579,6 +709,16 @@ class NanoJev4BASGIApp:
             mx.eval(pred_logits)
 
             for qid, q in raw_questions.items():
+                # Rule-based fast bypass for initial turns without current route
+                if qid == "model_change_required" and "current_route" not in state_text:
+                    answers[qid] = {
+                        "type": "noul",
+                        "noul": 0.0,
+                        "confidence": 1.0,
+                        "probabilities": {"yes": 0.0, "no": 1.0},
+                    }
+                    continue
+
                 qtype = q.get("type", "choice")
                 crit = q.get("criteria", {})
                 logits = pred_logits[qid]
@@ -612,7 +752,7 @@ class NanoJev4BASGIApp:
                         "confidence": probs[pred],
                     }
 
-            return answers, len(prefix_tokens), cache_hit
+            return answers, len(prefix_tokens), delta_token_count, hit_type
 
         answers = {}
         total_tokens = len(prefix_tokens)
@@ -701,7 +841,7 @@ class NanoJev4BASGIApp:
                     "confidence": probs[pred],
                 }
 
-        return answers, total_tokens, cache_hit
+        return answers, total_tokens, delta_token_count, hit_type
 
     async def send_response(
         self,

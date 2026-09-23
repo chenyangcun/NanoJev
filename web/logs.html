@@ -252,7 +252,9 @@
       align-items: center;
       gap: 4px;
     }
-    .hit-yes { background: var(--green-bg); color: var(--green); border: 1px solid rgba(34,197,94,0.3); }
+    .hit-exact { background: var(--green-bg); color: var(--green); border: 1px solid rgba(34,197,94,0.3); }
+    .hit-prefix { background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); }
+    .hit-sys { background: rgba(234, 179, 8, 0.12); color: #eab308; border: 1px solid rgba(234, 179, 8, 0.3); }
     .hit-no { background: rgba(148, 163, 184, 0.1); color: var(--text-muted); border: 1px solid var(--card-border); }
 
     .lat-fast { color: var(--green); font-weight: 600; }
@@ -625,9 +627,18 @@
           decHtml = `<span style="color: var(--red);">${log.error}</span>`;
         }
 
-        const hitHtml = log.cache_hit 
-          ? `<span class="hit-badge hit-yes">● HIT</span>` 
-          : `<span class="hit-badge hit-no">○ MISS</span>`;
+        let hitHtml = '';
+        if (log.cache_hit_type === 'exact') {
+          hitHtml = `<span class="hit-badge hit-exact">● EXACT (0 tok)</span>`;
+        } else if (log.cache_hit_type === 'prefix') {
+          hitHtml = `<span class="hit-badge hit-prefix">◐ RADIX PREFIX</span>`;
+        } else if (log.cache_hit_type === 'system') {
+          hitHtml = `<span class="hit-badge hit-sys">○ PREBAKED SYS</span>`;
+        } else if (log.cache_hit) {
+          hitHtml = `<span class="hit-badge hit-exact">● HIT</span>`;
+        } else {
+          hitHtml = `<span class="hit-badge hit-no">✕ MISS</span>`;
+        }
 
         html += `
           <tr onclick="inspectLog(${idx})">
