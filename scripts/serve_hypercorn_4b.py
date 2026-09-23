@@ -23,6 +23,7 @@ def main():
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8770)
     parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--lru-capacity", type=int, default=8, help="Number of distinct state KV caches to retain in LRU (default: 8)")
     parser.add_argument(
         "--http",
         default="h2c",
@@ -38,6 +39,7 @@ def main():
         web_root=args.web_root,
         default_temperature=args.temperature,
         allow_h1_fallback=(args.http != "h2c"),
+        lru_capacity=args.lru_capacity,
     )
 
     config = Config()

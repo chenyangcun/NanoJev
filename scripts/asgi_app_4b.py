@@ -1,19 +1,23 @@
-"""NanoJev-4B High-Performance Asynchronous ASGI Application.
+"""NanoJev-4B High-Performance Asynchronous ASGI Application (P0 Optimized).
 Supports h2c (HTTP/2 cleartext) and HTTP/1.1 via Hypercorn.
 
 Features:
 - Full parity with /v1/systemone (TypeSafe API) and /api/evaluate.
-- Dynamic KV Cache state prefix sharing across questions in one request.
-- Inter-request state prefix caching for identical multi-turn contexts.
+- Multi-State LRU KV Cache (8 slots, bounded unified memory, high hit rate).
+- Decoupled Async Event Loop (asyncio.Lock + worker thread offloading).
+- Tail-Preserving Context Truncation (Head 500 + Tail 3000 tokens).
 - Calibrated temperature scaling and conservative tie-breaking.
+- Detailed Telemetry (X-Inference-Time-Ms, X-Cache-Hit, X-Prefill-Tokens).
 - Integrated Apple MPS Multimodal Vision Engine.
 """
+import asyncio
+from collections import OrderedDict
 import copy
 import hashlib
 import json
-import time
 from pathlib import Path
-from typing import Optional
+import time
+from typing import Optional, Tuple
 
 import mlx.core as mx
 from mlx_lm.models.cache import make_prompt_cache
@@ -24,6 +28,10 @@ DIRECT_SYSTEM = (
     "Respond with only its uppercase letter, with no explanation or reasoning."
 )
 CALIBRATED_TEMPS = {"choice": 1.8172, "boolean": 3.5866, "score": 1.2567}
+MAX_PREFIX_TOKENS = 3500
+HEAD_PRESERVE_TOKENS = 500
+TAIL_PRESERVE_TOKENS = 3000
+DEFAULT_LRU_CAPACITY = 8
 
 
 class NanoJev4BASGIApp:
@@ -33,6 +41,7 @@ class NanoJev4BASGIApp:
         web_root: str = "web",
         default_temperature: float = 1.0,
         allow_h1_fallback: bool = False,
+        lru_capacity: int = DEFAULT_LRU_CAPACITY,
     ):
         from mlx_lm import load
 
@@ -42,11 +51,18 @@ class NanoJev4BASGIApp:
         print(f"[NanoJev-4B] Model loaded in {time.time()-t0:.2f}s!", flush=True)
 
         self.slot_tokens = [self.tokenizer.encode(L, add_special_tokens=False)[0] for L in LETTERS]
-        self.cached_state_hash = None
-        self.cached_kv = None
         self.web_root = Path(web_root).resolve()
         self.default_temperature = default_temperature
         self.allow_h1_fallback = allow_h1_fallback
+
+        # P0: Multi-State LRU Cache
+        self.lru_capacity = lru_capacity
+        self.lru_cache: OrderedDict[str, any] = OrderedDict()
+        self.total_requests = 0
+        self.cache_hits = 0
+
+        # P0: Async Event Loop Decoupling Lock
+        self._inference_lock = asyncio.Lock()
 
         # Vision engine (Apple MPS)
         import os
@@ -90,14 +106,19 @@ class NanoJev4BASGIApp:
 
         if method in ("GET", "HEAD"):
             if path == "/api/health":
+                hit_rate = (self.cache_hits / self.total_requests) if self.total_requests > 0 else 0.0
                 body = json.dumps({
                     "ready": True,
                     "model": "nanojev-4b",
                     "engine": "nanojev-4b-hybrid",
                     "architecture": "Qwen3.5-4B oQ4e-FP16 Metal GPU (2.3GB) + Multimodal Vision MPS",
                     "quantization": "oq4e-fp16",
-                    "http_version": scope.get("http_version", "1.1"),
+                    "http_version": http_version,
                     "prefix_sharing": True,
+                    "lru_cache_slots": len(self.lru_cache),
+                    "lru_cache_capacity": self.lru_capacity,
+                    "cache_hit_rate": round(hit_rate, 4),
+                    "total_requests": self.total_requests,
                     "vision_available": self.vision_engine is not None,
                     "status": "healthy",
                 }).encode("utf-8")
@@ -114,10 +135,7 @@ class NanoJev4BASGIApp:
                 if not msg.get("more_body", False):
                     break
 
-            if path == "/v1/systemone":
-                await self.handle_typesafe_systemone(scope, send, bytes(body))
-                return
-            if path == "/api/evaluate":
+            if path in ("/v1/systemone", "/api/evaluate"):
                 await self.handle_typesafe_systemone(scope, send, bytes(body))
                 return
 
@@ -135,10 +153,17 @@ class NanoJev4BASGIApp:
                 try:
                     from typesafe_adapter import typesafe_request_to_nanojev, nanojev_response_to_typesafe
                     nj_payload, meta = typesafe_request_to_nanojev(payload)
+                    t0_vis = time.perf_counter()
                     nj_res = self.vision_engine.predict(nj_payload, temperature=temp)
+                    vis_ms = (time.perf_counter() - t0_vis) * 1000
                     ts_res = nanojev_response_to_typesafe(nj_res, meta)
                     resp_bytes = json.dumps(ts_res, ensure_ascii=False, allow_nan=False).encode("utf-8")
-                    await self.send_response(send, 200, resp_bytes, "application/json; charset=utf-8")
+                    extra_headers = [
+                        (b"x-inference-time-ms", f"{vis_ms:.1f}".encode("utf-8")),
+                        (b"x-cache-hit", b"0"),
+                        (b"x-lane", b"vision-mps"),
+                    ]
+                    await self.send_response(send, 200, resp_bytes, "application/json; charset=utf-8", extra_headers=extra_headers)
                 except (ValueError, TypeError, KeyError) as exc:
                     err = json.dumps({"error": str(exc)}).encode("utf-8")
                     await self.send_response(send, 422, err, "application/json; charset=utf-8")
@@ -147,14 +172,27 @@ class NanoJev4BASGIApp:
                     await self.send_response(send, 500, err, "application/json; charset=utf-8")
                 return
 
-            answers, total_tokens = self.predict_multi_questions(state, raw_questions, temperature=temp)
+            # P0: Non-blocking async queue - event loop remains responsive
+            async with self._inference_lock:
+                t0_infer = time.perf_counter()
+                answers, total_tokens, cache_hit = await asyncio.to_thread(
+                    self.predict_multi_questions, state, raw_questions, temperature=temp
+                )
+                infer_ms = (time.perf_counter() - t0_infer) * 1000
+
             resp = {
                 "model": "nanojev-4b",
                 "answers": answers,
                 "usage": {"input_tokens": total_tokens, "output_tokens": 0},
             }
             resp_bytes = json.dumps(resp, ensure_ascii=False, allow_nan=False).encode("utf-8")
-            await self.send_response(send, 200, resp_bytes, "application/json; charset=utf-8")
+            extra_headers = [
+                (b"x-inference-time-ms", f"{infer_ms:.1f}".encode("utf-8")),
+                (b"x-cache-hit", b"1" if cache_hit else b"0"),
+                (b"x-prefill-tokens", str(total_tokens).encode("utf-8")),
+                (b"x-lane", b"metal-gpu-4b"),
+            ]
+            await self.send_response(send, 200, resp_bytes, "application/json; charset=utf-8", extra_headers=extra_headers)
         except (ValueError, TypeError, KeyError) as exc:
             err = json.dumps({"error": str(exc)}).encode("utf-8")
             await self.send_response(send, 422, err, "application/json; charset=utf-8")
@@ -162,25 +200,47 @@ class NanoJev4BASGIApp:
             err = json.dumps({"error": f"Internal error: {str(exc)}"}).encode("utf-8")
             await self.send_response(send, 500, err, "application/json; charset=utf-8")
 
-    def predict_multi_questions(self, state, raw_questions: dict, temperature: float = 1.0):
+    def _truncate_prefix_tokens(self, tokens: list[int]) -> list[int]:
+        """P0: Tail-preserving context truncation."""
+        if len(tokens) <= MAX_PREFIX_TOKENS:
+            return tokens
+        # Preserve head (system instruction + metadata) and tail (recent evidence & user command)
+        head = tokens[:HEAD_PRESERVE_TOKENS]
+        tail = tokens[-TAIL_PRESERVE_TOKENS:]
+        return head + tail
+
+    def predict_multi_questions(self, state, raw_questions: dict, temperature: float = 1.0) -> Tuple[dict, int, bool]:
         state_text = json.dumps(state, ensure_ascii=False) if isinstance(state, (dict, list)) else str(state)
         prefix_text = f"<|im_start|>system\n{DIRECT_SYSTEM}<|im_end|>\n<|im_start|>user\nEvidence:\n{state_text}\n\n"
-        prefix_tokens = self.tokenizer.encode(prefix_text, add_special_tokens=False)
-        if len(prefix_tokens) > 3500:
-            prefix_tokens = prefix_tokens[:3500]
+        raw_tokens = self.tokenizer.encode(prefix_text, add_special_tokens=False)
+        prefix_tokens = self._truncate_prefix_tokens(raw_tokens)
 
+        # Hash prefix tokens to identify unique state contexts
         state_hash = hashlib.sha256(prefix_text.encode("utf-8")).hexdigest()
 
-        if self.cached_state_hash == state_hash and self.cached_kv is not None:
-            base_cache = self.cached_kv
+        self.total_requests += 1
+        cache_hit = False
+
+        # P0: Multi-State LRU Cache Lookup
+        if state_hash in self.lru_cache:
+            base_cache = self.lru_cache.pop(state_hash)
+            self.lru_cache[state_hash] = base_cache  # Move to most recently used
+            self.cache_hits += 1
+            cache_hit = True
         else:
             cache = make_prompt_cache(self.model)
             x_prefix = mx.array([prefix_tokens], dtype=mx.int32)
             self.model(x_prefix, cache=cache)
             mx.eval([e.state for e in cache])
             mx.synchronize()
-            self.cached_state_hash = state_hash
-            self.cached_kv = cache
+
+            # Evict oldest entry if at capacity
+            if len(self.lru_cache) >= self.lru_capacity:
+                _oldest_key, oldest_val = self.lru_cache.popitem(last=False)
+                del oldest_val
+                mx.metal.clear_cache()
+
+            self.lru_cache[state_hash] = cache
             base_cache = cache
 
         answers = {}
@@ -253,14 +313,24 @@ class NanoJev4BASGIApp:
                     "confidence": probs[pred],
                 }
 
-        return answers, total_tokens
+        return answers, total_tokens, cache_hit
 
-    async def send_response(self, send, status: int, body: bytes, content_type: str, content_length: Optional[int] = None):
+    async def send_response(
+        self,
+        send,
+        status: int,
+        body: bytes,
+        content_type: str,
+        content_length: Optional[int] = None,
+        extra_headers: Optional[list] = None,
+    ):
         cl = len(body) if content_length is None else content_length
         headers = [
             (b"content-type", content_type.encode("utf-8")),
             (b"content-length", str(cl).encode("utf-8")),
             (b"cache-control", b"no-store"),
         ]
+        if extra_headers:
+            headers.extend(extra_headers)
         await send({"type": "http.response.start", "status": status, "headers": headers})
         await send({"type": "http.response.body", "body": body, "more_body": False})
