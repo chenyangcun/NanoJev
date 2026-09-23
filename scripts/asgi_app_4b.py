@@ -64,9 +64,11 @@ class NanoJev4BASGIApp:
         self.default_temperature = default_temperature
         self.allow_h1_fallback = allow_h1_fallback
 
-        # Solution 1: 0-Token Decision Heads Adapter
+        # Solution 1: 0-Token Decision Heads Adapter (Router + Webpage Memory Review)
         self.router_heads = None
+        self.memory_heads = None
         self.head_label_maps = None
+
         heads_path = Path(checkpoint_dir) / "heads" / "router_heads.safetensors"
         if heads_path.exists():
             try:
@@ -76,11 +78,28 @@ class NanoJev4BASGIApp:
                 weights = mx.load(str(heads_path))
                 self.router_heads.update(tree_unflatten(list(weights.items())))
                 mx.eval(self.router_heads.parameters())
-                self.head_label_maps = LABEL_MAPS
+                self.head_label_maps = dict(LABEL_MAPS)
                 print(f"[NanoJev-4B] Loaded 0-Token Specialized Router Decision Heads from {heads_path}!", flush=True)
             except Exception as e:
                 print(f"[NanoJev-4B] Notice: router heads not loaded ({e}); continuing with SemIf direct lane.", flush=True)
                 self.router_heads = None
+
+        mem_heads_path = Path(checkpoint_dir) / "heads" / "memory_heads.safetensors"
+        if mem_heads_path.exists():
+            try:
+                from mlx.utils import tree_unflatten
+                from train_4b_memory_heads import MemoryMultiHeads, LABEL_MAPS_MEMORY
+                self.memory_heads = MemoryMultiHeads(in_features=2560, hidden_dim=256)
+                weights = mx.load(str(mem_heads_path))
+                self.memory_heads.update(tree_unflatten(list(weights.items())))
+                mx.eval(self.memory_heads.parameters())
+                if self.head_label_maps is None:
+                    self.head_label_maps = {}
+                self.head_label_maps.update(LABEL_MAPS_MEMORY)
+                print(f"[NanoJev-4B] Loaded 0-Token Specialized Webpage Memory Heads from {mem_heads_path}!", flush=True)
+            except Exception as e:
+                print(f"[NanoJev-4B] Notice: memory heads not loaded ({e}).", flush=True)
+                self.memory_heads = None
 
         # Lock Metal wired memory to prevent swapping and eliminate tail latency
         if mx.metal.is_available():
@@ -292,7 +311,8 @@ class NanoJev4BASGIApp:
         p95 = round(sorted(latencies)[int(len(latencies) * 0.95)], 1) if latencies else 0.0
         avg_lat = round(statistics.mean(latencies), 1) if latencies else 0.0
         avg_size = round(statistics.mean(sizes), 1) if sizes else 0.0
-        hit_rate = round(hits_count / total_count, 4) if total_count > 0 else 0.0
+        total_hits = self.cache_hits_exact + self.cache_hits_prefix + self.cache_hits_system
+        hit_rate = round(total_hits / self.total_requests, 4) if self.total_requests > 0 else 0.0
 
         # Filter logs
         filtered = logs_list
@@ -327,7 +347,7 @@ class NanoJev4BASGIApp:
             "stats": {
                 "total_requests": self.total_requests or total_count,
                 "recent_window_requests": total_count,
-                "cache_hits": self.cache_hits or hits_count,
+                "cache_hits": total_hits or hits_count,
                 "cache_hit_rate": hit_rate,
                 "p50_latency_ms": p50,
                 "p95_latency_ms": p95,
@@ -687,7 +707,7 @@ class NanoJev4BASGIApp:
                 hit_type = "miss"
                 delta_token_count = len(prefix_tokens)
 
-        # Solution 1: 0-Token Decision Heads Lane
+        # Solution 1: 0-Token Decision Heads Lane (Router or Webpage Memory)
         def _options_match_head(qk, q):
             if not self.head_label_maps or qk not in self.head_label_maps:
                 return False
@@ -698,14 +718,24 @@ class NanoJev4BASGIApp:
             crit_keys = list(crit.keys()) if isinstance(crit, dict) else [str(i) for i in range(len(crit))]
             return bool(crit_keys and all(k.lower() in mapping for k in crit_keys))
 
-        can_use_heads = (
+        # Check which specialized adapter to activate
+        is_memory_call = (
+            self.memory_heads is not None
+            and any(qk in ("page_role", "content_sufficiency", "future_useful") for qk in raw_questions.keys())
+            and all(_options_match_head(qk, q) for qk, q in raw_questions.items())
+        )
+        is_router_call = (
             self.router_heads is not None
+            and not is_memory_call
             and all(_options_match_head(qk, q) for qk, q in raw_questions.items())
         )
 
-        if can_use_heads:
+        can_use_heads = is_memory_call or is_router_call
+        active_heads = self.memory_heads if is_memory_call else self.router_heads
+
+        if can_use_heads and active_heads is not None:
             answers = {}
-            pred_logits = self.router_heads(last_vec)
+            pred_logits = active_heads(last_vec)
             mx.eval(pred_logits)
 
             for qid, q in raw_questions.items():
@@ -732,6 +762,20 @@ class NanoJev4BASGIApp:
                         "noul": p_yes,
                         "confidence": round(max(p_yes, 1.0 - p_yes), 4),
                         "probabilities": {"yes": p_yes, "no": round(1.0 - p_yes, 4)},
+                    }
+                elif qtype == "score":
+                    probs_list = mx.softmax(logits / max(1e-4, temperature)).tolist()
+                    # Calculate continuous score: sum(i * prob[i])
+                    exp_score = sum(i * probs_list[i] for i in range(len(probs_list)))
+                    legend = {str(i): crit[i] if isinstance(crit, list) and i < len(crit) else f"Level {i}" for i in range(len(probs_list))}
+                    prob_dict = {str(i): round(probs_list[i], 4) for i in range(len(probs_list))}
+                    conf = max(probs_list)
+                    answers[qid] = {
+                        "type": "score",
+                        "score": round(exp_score, 2),
+                        "confidence": round(conf, 4),
+                        "legend": legend,
+                        "probabilities": prob_dict,
                     }
                 else:
                     crit_keys = list(crit.keys()) if isinstance(crit, dict) else [str(i) for i in range(len(crit))]
