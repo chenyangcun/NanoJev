@@ -141,17 +141,12 @@ class VisionDecisionEngine:
         logger.info("[VisionEngine] Vision Decision Engine ready on Apple MPS!")
 
     def has_image(self, state_input: Any) -> bool:
-        """Quick check if state contains an image without fully decoding it."""
-        if isinstance(state_input, dict):
-            if "image" in state_input:
-                return True
-            for k in ("user_task", "task_origin", "task"):
-                v = state_input.get(k)
-                if isinstance(v, str) and ("<image" in v or "data:image/" in v):
-                    return True
-        elif isinstance(state_input, str):
-            return "<image" in state_input or "data:image/" in state_input
-        return False
+        """Quick check if state contains an image that can actually be loaded."""
+        try:
+            image, _ = extract_image_from_state(state_input)
+            return image is not None
+        except Exception:
+            return False
 
     def predict(self, payload: dict, temperature: float = 1.0) -> dict:
         """Execute multimodal decision prediction on image + text."""
