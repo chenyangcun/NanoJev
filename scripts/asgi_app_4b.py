@@ -215,9 +215,10 @@ class NanoJev4BASGIApp:
             await self.send_response(send, 404, b'{"error":"Unknown endpoint"}', "application/json; charset=utf-8")
 
     async def handle_api_logs(self, scope, send):
-        """API endpoint returning live request metrics and recent request history."""
+        """API endpoint returning live request metrics and paginated request history."""
         query_str = scope.get("query_string", b"").decode("utf-8")
-        limit = 50
+        page = 1
+        page_size = 20
         filter_type = None
         search_kw = None
         if query_str:
@@ -225,14 +226,16 @@ class NanoJev4BASGIApp:
             for p in parts:
                 if "=" in p:
                     k, v = p.split("=", 1)
-                    if k == "limit" and v.isdigit():
-                        limit = min(200, max(1, int(v)))
+                    if k in ("limit", "page_size") and v.isdigit():
+                        page_size = min(200, max(1, int(v)))
+                    elif k == "page" and v.isdigit():
+                        page = max(1, int(v))
                     elif k == "filter":
                         filter_type = v.strip().lower()
                     elif k == "search":
                         search_kw = v.strip().lower()
 
-        # Compute summary stats across recent logs
+        # Compute summary stats across all recent logs
         logs_list = list(self.recent_logs)
         total_count = len(logs_list)
         hits_count = sum(1 for x in logs_list if x.get("cache_hit"))
@@ -263,8 +266,16 @@ class NanoJev4BASGIApp:
                 or search_kw in str(x.get("state_preview", "")).lower()
             ]
 
-        # Return latest entries up to limit
-        recent_slice = list(reversed(filtered))[:limit]
+        # Pagination calculations
+        total_records = len(filtered)
+        total_pages = max(1, (total_records + page_size - 1) // page_size)
+        if page > total_pages:
+            page = total_pages
+
+        reversed_filtered = list(reversed(filtered))
+        start_idx = (page - 1) * page_size
+        end_idx = min(start_idx + page_size, total_records)
+        page_slice = reversed_filtered[start_idx:end_idx]
 
         payload = {
             "stats": {
@@ -280,7 +291,17 @@ class NanoJev4BASGIApp:
                 "lru_capacity": self.lru_capacity,
                 "uptime_seconds": round(time.time() - self.start_time, 1),
             },
-            "logs": recent_slice,
+            "pagination": {
+                "page": page,
+                "page_size": page_size,
+                "total_records": total_records,
+                "total_pages": total_pages,
+                "start_index": start_idx + 1 if total_records > 0 else 0,
+                "end_index": end_idx,
+                "has_prev": page > 1,
+                "has_next": page < total_pages,
+            },
+            "logs": page_slice,
         }
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         await self.send_response(send, 200, body, "application/json; charset=utf-8")

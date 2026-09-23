@@ -197,7 +197,7 @@
     .table-container {
       background: var(--card-bg);
       border: 1px solid var(--card-border);
-      border-radius: 12px;
+      border-radius: 12px 12px 0 0;
       overflow-x: auto;
     }
     table {
@@ -270,6 +270,76 @@
       margin: 2px 4px 2px 0;
     }
     .decision-key { color: var(--text-muted); margin-right: 3px; }
+
+    /* Pagination Styles */
+    .pagination-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 14px 20px;
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-top: none;
+      border-radius: 0 0 12px 12px;
+      flex-wrap: wrap;
+      gap: 12px;
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+    .pagination-controls {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .page-btn {
+      padding: 4px 10px;
+      min-width: 32px;
+      height: 32px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 6px;
+      border: 1px solid var(--card-border);
+      background: rgba(11, 15, 25, 0.5);
+      color: var(--text-main);
+      cursor: pointer;
+      font-size: 13px;
+      transition: all 0.15s;
+    }
+    .page-btn:hover:not(:disabled) {
+      border-color: var(--accent);
+      background: var(--accent-glow);
+    }
+    .page-btn.active {
+      background: var(--accent);
+      color: #0b0f19;
+      font-weight: 700;
+      border-color: var(--accent);
+    }
+    .page-btn:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+    }
+    .page-size-selector select {
+      padding: 4px 8px;
+      font-size: 12px;
+      margin-left: 6px;
+    }
+    .page-jump {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .page-jump input {
+      width: 52px;
+      padding: 5px 6px;
+      background: #0b0f19;
+      border: 1px solid var(--card-border);
+      color: var(--text-main);
+      border-radius: 6px;
+      text-align: center;
+      font-size: 13px;
+    }
 
     /* Modal Drawer */
     .drawer-overlay {
@@ -414,6 +484,33 @@
         </tbody>
       </table>
     </div>
+
+    <!-- Pagination Controls -->
+    <div class="pagination-bar" id="pagination-bar">
+      <div class="pagination-info" id="pagination-info">显示第 0 - 0 条，共 0 条</div>
+      <div class="pagination-controls" id="pagination-controls">
+        <button class="page-btn" id="btn-first" title="首页">&laquo;</button>
+        <button class="page-btn" id="btn-prev" title="上一页">&lsaquo;</button>
+        <div id="page-numbers" style="display: flex; gap: 4px;"></div>
+        <button class="page-btn" id="btn-next" title="下一页">&rsaquo;</button>
+        <button class="page-btn" id="btn-last" title="末页">&raquo;</button>
+      </div>
+      <div style="display: flex; align-items: center; gap: 16px; flex-wrap: wrap;">
+        <div class="page-size-selector">
+          每页显示:
+          <select id="select-page-size">
+            <option value="10">10 条</option>
+            <option value="20" selected>20 条</option>
+            <option value="50">50 条</option>
+            <option value="100">100 条</option>
+          </select>
+        </div>
+        <div class="page-jump">
+          前往第 <input type="number" id="jump-page-input" min="1" value="1"> 页
+          <button id="btn-jump" style="padding: 4px 10px; font-size: 12px;">跳转</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- Detail Drawer -->
@@ -447,6 +544,10 @@
     let currentFilter = 'all';
     let logsData = [];
     let refreshTimer = null;
+    let currentPage = 1;
+    let pageSize = 20;
+    let totalPages = 1;
+    let totalRecords = 0;
 
     function formatBytes(bytes) {
       if (!bytes || bytes === 0) return '0 B';
@@ -465,7 +566,7 @@
     async function fetchLogs() {
       try {
         const search = document.getElementById('search-input').value.trim();
-        let url = `/api/logs?limit=100`;
+        let url = `/api/logs?page=${currentPage}&page_size=${pageSize}`;
         if (currentFilter !== 'all') url += `&filter=${currentFilter}`;
         if (search) url += `&search=${encodeURIComponent(search)}`;
 
@@ -474,6 +575,7 @@
         const data = await res.json();
         renderKPIs(data.stats);
         renderTable(data.logs);
+        renderPagination(data.pagination);
         logsData = data.logs;
       } catch (err) {
         document.getElementById('conn-status').innerText = '连接异常 (重试中...)';
@@ -544,6 +646,48 @@
       tbody.innerHTML = html;
     }
 
+    function renderPagination(p) {
+      if (!p) return;
+      currentPage = p.page;
+      pageSize = p.page_size;
+      totalPages = p.total_pages;
+      totalRecords = p.total_records;
+
+      // Update text
+      document.getElementById('pagination-info').innerText = 
+        `显示第 ${p.start_index} - ${p.end_index} 条，共 ${p.total_records} 条记录 (第 ${p.page} / ${p.total_pages} 页)`;
+
+      // Update button disabled states
+      document.getElementById('btn-first').disabled = (currentPage <= 1);
+      document.getElementById('btn-prev').disabled = !p.has_prev;
+      document.getElementById('btn-next').disabled = !p.has_next;
+      document.getElementById('btn-last').disabled = (currentPage >= totalPages);
+      document.getElementById('jump-page-input').max = totalPages;
+      document.getElementById('jump-page-input').value = currentPage;
+
+      // Render page numbers (show up to 5 surrounding pages)
+      const container = document.getElementById('page-numbers');
+      container.innerHTML = '';
+      let startP = Math.max(1, currentPage - 2);
+      let endP = Math.min(totalPages, startP + 4);
+      if (endP - startP < 4) {
+        startP = Math.max(1, endP - 4);
+      }
+
+      for (let i = startP; i <= endP; i++) {
+        const btn = document.createElement('button');
+        btn.className = 'page-btn' + (i === currentPage ? ' active' : '');
+        btn.innerText = i;
+        btn.onclick = () => {
+          if (i !== currentPage) {
+            currentPage = i;
+            fetchLogs();
+          }
+        };
+        container.appendChild(btn);
+      }
+    }
+
     function inspectLog(idx) {
       const log = logsData[idx];
       if (!log) return;
@@ -589,16 +733,64 @@
         document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         currentFilter = btn.dataset.filter;
+        currentPage = 1; // Reset to page 1 on filter change
         fetchLogs();
       };
     });
 
     document.getElementById('search-input').oninput = () => {
+      currentPage = 1; // Reset to page 1 on search change
       fetchLogs();
     };
 
     document.getElementById('btn-refresh').onclick = () => {
       fetchLogs();
+    };
+
+    // Pagination Click Handlers
+    document.getElementById('btn-first').onclick = () => {
+      if (currentPage > 1) {
+        currentPage = 1;
+        fetchLogs();
+      }
+    };
+    document.getElementById('btn-prev').onclick = () => {
+      if (currentPage > 1) {
+        currentPage--;
+        fetchLogs();
+      }
+    };
+    document.getElementById('btn-next').onclick = () => {
+      if (currentPage < totalPages) {
+        currentPage++;
+        fetchLogs();
+      }
+    };
+    document.getElementById('btn-last').onclick = () => {
+      if (currentPage < totalPages) {
+        currentPage = totalPages;
+        fetchLogs();
+      }
+    };
+
+    document.getElementById('select-page-size').onchange = (e) => {
+      pageSize = parseInt(e.target.value);
+      currentPage = 1;
+      fetchLogs();
+    };
+
+    document.getElementById('btn-jump').onclick = () => {
+      const p = parseInt(document.getElementById('jump-page-input').value);
+      if (p >= 1 && p <= totalPages && p !== currentPage) {
+        currentPage = p;
+        fetchLogs();
+      }
+    };
+
+    document.getElementById('jump-page-input').onkeydown = (e) => {
+      if (e.key === 'Enter') {
+        document.getElementById('btn-jump').click();
+      }
     };
 
     function setupRefresh() {
