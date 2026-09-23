@@ -143,7 +143,8 @@ def make_handler(predictor: NanoJev4BPredictor, default_temp: float = 1.0):
                     "ready": True,
                     "model": "nanojev-4b",
                     "engine": "nanojev-4b-hybrid",
-                    "architecture": "Qwen3.5-4B 8-bit Metal GPU + Multimodal Vision MPS",
+                    "architecture": "Qwen3.5-4B oQ4e-FP16 Metal GPU (2.3GB) + Multimodal Vision MPS",
+                    "quantization": "oq4e-fp16",
                     "vision_available": predictor.vision_engine is not None,
                     "status": "healthy"
                 })
@@ -213,7 +214,7 @@ def make_handler(predictor: NanoJev4BPredictor, default_temp: float = 1.0):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint-dir", default="checkpoints/qwen35_4b_8bit")
+    parser.add_argument("--checkpoint-dir", default="checkpoints/qwen35_4b_oq4e_fp16")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8770)
     parser.add_argument("--temperature", type=float, default=1.0)

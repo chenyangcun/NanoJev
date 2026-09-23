@@ -1,0 +1,78 @@
+#!/bin/bash
+# Service controller for NanoJev-4B (oQ4e-FP16) on port 8770
+
+BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON="/Users/chenyc/work/NanoJev/.venv/bin/python3"
+SCRIPT="$BASE_DIR/scripts/serve_4b.py"
+LOG="$BASE_DIR/serve_4b.log"
+PORT=8770
+MODEL_DIR="$BASE_DIR/checkpoints/qwen35_4b_oq4e_fp16"
+
+is_running() {
+    lsof -i :$PORT >/dev/null 2>&1
+}
+
+start() {
+    if is_running; then
+        echo "NanoJev-4B is already running on port $PORT."
+        return 0
+    fi
+    echo "Starting NanoJev-4B (oQ4e-FP16) on port $PORT..."
+    cd "$BASE_DIR"
+    nohup "$PYTHON" "$SCRIPT" --checkpoint-dir "$MODEL_DIR" --port "$PORT" > "$LOG" 2>&1 &
+    sleep 3
+    if is_running; then
+        echo "NanoJev-4B started successfully! (PID: $(lsof -t -i :$PORT))"
+        curl -s "http://127.0.0.1:$PORT/api/health" | python3 -m json.tool 2>/dev/null || true
+    else
+        echo "Failed to start NanoJev-4B. Check $LOG for details."
+        tail -n 20 "$LOG"
+        return 1
+    fi
+}
+
+stop() {
+    if ! is_running; then
+        echo "NanoJev-4B is not running on port $PORT."
+        return 0
+    fi
+    echo "Stopping NanoJev-4B on port $PORT..."
+    pkill -f "$SCRIPT" || true
+    sleep 2
+    if ! is_running; then
+        echo "NanoJev-4B stopped."
+    else
+        echo "Force killing remaining process..."
+        fuser -k $PORT/tcp 2>/dev/null || true
+    fi
+}
+
+status() {
+    if is_running; then
+        echo "NanoJev-4B is RUNNING on port $PORT (PID: $(lsof -t -i :$PORT))"
+        curl -s "http://127.0.0.1:$PORT/api/health" | python3 -m json.tool 2>/dev/null || true
+    else
+        echo "NanoJev-4B is STOPPED."
+    fi
+}
+
+case "$1" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart)
+        stop
+        sleep 1
+        start
+        ;;
+    status)
+        status
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 1
+        ;;
+esac
