@@ -223,6 +223,15 @@ class MLXDecisionPredictor:
         self.early_exit_confidence = early_exit_confidence
         self.inference_calls = 0
 
+        calibrated_cfg = Path(checkpoint_dir) / "calibrated_config.json"
+        self.calibrated_temps = {}
+        if calibrated_cfg.exists():
+            try:
+                loaded = json.loads(calibrated_cfg.read_text(encoding="utf-8"))
+                self.calibrated_temps = {k: float(v) for k, v in loaded.items() if isinstance(v, (int, float))}
+            except Exception:
+                pass
+
         # Initialize pre-allocated in-place StaticKVCachePool if prefix sharing enabled
         self.is_qwen35 = getattr(self.model, "is_qwen35", False)
         if self.enable_prefix_sharing and not self.is_qwen35:
@@ -276,10 +285,14 @@ class MLXDecisionPredictor:
                     mx.eval(logits)
                     scores = logits[0, :k] if logits.ndim > 1 else logits[:k]
 
+                    qtype = q.get("type", "choice")
+                    calib_factor = self.calibrated_temps.get(qtype, 1.0)
+                    base_temp = calib_factor * float(temperature)
+
                     if self.enable_adaptive_temp:
-                        eff_temp = compute_adaptive_temperature(scores, base_temp=float(temperature))
+                        eff_temp = compute_adaptive_temperature(scores, base_temp=base_temp)
                     else:
-                        eff_temp = float(temperature)
+                        eff_temp = base_temp
 
                     probs = mx.softmax(scores / eff_temp, axis=-1).tolist()
                     ans = answer_from_probabilities(mock_ex[0], probs)

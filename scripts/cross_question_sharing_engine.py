@@ -58,14 +58,20 @@ def compiled_heads_forward(leaves, norm_w, norm_b, fc1_w, fc1_b, fc2_w, fc2_b):
     return logits
 
 
-def compute_adaptive_temperature(scores: mx.array, base_temp: float = 0.35, min_temp: float = 0.25, max_temp: float = 0.85) -> float:
+def compute_adaptive_temperature(scores: mx.array, base_temp: float = 1.0, min_temp: float | None = None, max_temp: float | None = None) -> float:
     """Dynamically adjust temperature based on margin separation between top candidates.
 
-    - Large separation (delta >= 2.0): clear unambiguous decision -> low temperature (sharp confidence >= 0.95)
-    - Small separation (delta <= 0.4): ambiguous edge case -> higher temperature (preserves natural uncertainty for fallback)
+    - Large separation (delta >= 2.0): clear unambiguous decision -> lower temperature (scales to min_temp)
+    - Small separation (delta <= 0.4): ambiguous edge case -> higher temperature (preserves natural uncertainty)
     """
     if scores.size <= 1:
-        return base_temp
+        return float(base_temp)
+
+    base = float(base_temp)
+    if min_temp is None:
+        min_temp = max(0.1, base * 0.75)
+    if max_temp is None:
+        max_temp = base * 1.5
 
     s_sorted = mx.sort(scores)[::-1]
     delta = (s_sorted[0] - s_sorted[1]).item()
@@ -73,7 +79,7 @@ def compute_adaptive_temperature(scores: mx.array, base_temp: float = 0.35, min_
     # Sigmoidal interpolation between min_temp and max_temp
     # center = 1.3, slope = 2.0
     t = max_temp - (max_temp - min_temp) / (1.0 + math.exp(-2.0 * (delta - 1.3)))
-    return round(t, 3)
+    return round(float(t), 3)
 
 
 def build_question_suffix_and_candidates(question_dict: dict, tokenizer) -> Tuple[List[int], List[str], List[List[int]]]:
