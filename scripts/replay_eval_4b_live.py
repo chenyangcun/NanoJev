@@ -82,7 +82,6 @@ def main():
     print("-" * 80)
 
     results = []
-    headers = {"Content-Type": "application/json", "X-Decision-Head": "router"}
 
     for idx, item in enumerate(items, 1):
         req = item["request"]
@@ -91,6 +90,23 @@ def main():
         off_ans = off_resp.get("answers", {})
         step_type = item.get("step_type", "unknown")
         q_count = len(req.get("questions", {}))
+
+        # Derive session affinity from task origin/user task to simulate real agent sessions
+        st = req.get("state", {})
+        task = ""
+        if isinstance(st, dict):
+            task = st.get("task_origin") or st.get("user_task") or ""
+        elif isinstance(st, str):
+            task = st[:200]
+
+        import hashlib
+        session_id = hashlib.md5(str(task).encode("utf-8")).hexdigest()[:16] if task else item.get("request_id")
+
+        headers = {
+            "Content-Type": "application/json",
+            "X-Decision-Head": "router",
+            "X-Session-ID": str(session_id),
+        }
 
         t0 = time.perf_counter()
         resp = post_systemone_json(args.url, req, headers, timeout=20.0)
