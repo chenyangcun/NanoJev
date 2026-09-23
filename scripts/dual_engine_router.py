@@ -70,9 +70,10 @@ class DualEngineRouter:
 
         # 3. Initialize Multimodal Vision Engine (Apple MPS Qwen3.5-0.8B)
         self.vision_engine = None
+        vision_ckpt = "checkpoints/dohnuts_merged_0.8b" if Path("checkpoints/dohnuts_merged_0.8b").exists() else gpu_checkpoint_dir
         try:
             from vision_decision_engine import VisionDecisionEngine
-            self.vision_engine = VisionDecisionEngine(checkpoint_dir=gpu_checkpoint_dir)
+            self.vision_engine = VisionDecisionEngine(checkpoint_dir=vision_ckpt)
             logger.info("[DualEngine] Multimodal Vision Engine loaded successfully on Apple MPS!")
         except Exception as e:
             logger.info(f"[DualEngine] Vision Engine not initialized ({e}); continuing with pure-text lanes.")

@@ -52,24 +52,74 @@ def compute_ece(probs_list, labels_list, num_bins=15):
     return ece
 
 
+def render_dohnuts_question_with_prefix(state_text: str, qid: str, q: dict, marker: str = "<|fim_suffix|>"):
+    typ = q["type"]
+    instr = q.get("instructions", "")
+    if isinstance(instr, (dict, list)):
+        instr = json.dumps(instr, ensure_ascii=False)
+    else:
+        instr = str(instr)
+
+    if typ in ("boolean", "noul"):
+        crit = q.get("criteria", {})
+        if not isinstance(crit, dict):
+            crit = {}
+        f_text = crit.get("false") or "no, the statement does not hold"
+        t_text = crit.get("true") or "yes, the statement holds"
+        options = [f"false: {f_text}", f"true: {t_text}"]
+        cands = ["false", "true"]
+    elif typ == "choice":
+        crit = q.get("criteria", {})
+        if isinstance(crit, dict):
+            cands = list(crit.keys())
+            options = [f"{k}: {crit[k]}" for k in cands]
+        elif isinstance(crit, list):
+            cands = [str(x) for x in crit]
+            options = [str(x) for x in crit]
+        else:
+            cands = ["0", "1"]
+            options = ["Option 0", "Option 1"]
+    else:  # score
+        crit = q.get("criteria", [])
+        if isinstance(crit, dict):
+            cands = list(crit.keys())
+            options = [f"level {k}: {crit[k]}" for k in cands]
+        elif isinstance(crit, list):
+            cands = [str(i) for i in range(len(crit))]
+            options = [f"level {i}: {crit[i]}" for i in range(len(crit))]
+        else:
+            cands = ["0", "1"]
+            options = ["level 0", "level 1"]
+
+    state_clean = json.dumps(state_text, ensure_ascii=False) if isinstance(state_text, (dict, list)) else str(state_text)
+    prompt_qtype = "noul" if typ in ("boolean", "noul") else typ
+    prompt_prefix = f"State: {state_clean}\n{prompt_qtype} question: {instr}\nOptions:\n"
+    prompt = prompt_prefix + "".join(f"- {opt}{marker}" for opt in options)
+    return prompt, prompt_prefix, cands
+
+
 def forward_qwen35_question(model, tokenizer, head, state: str, question: dict, marker: str = "<|fim_suffix|>", temperature: float = 1.0):
-    prompt, cands = render_dohnuts_question(state, "q0", question, marker=marker)
+    prompt, pfx, cands = render_dohnuts_question_with_prefix(state, "q0", question, marker=marker)
+    pfx_ids = tokenizer.encode(pfx)
     input_ids = tokenizer.encode(prompt)
     marker_id = tokenizer.convert_tokens_to_ids(marker)
     marker_positions = [pos for pos, tid in enumerate(input_ids) if tid == marker_id]
+    state_pos = len(pfx_ids) - 1
 
-    if not marker_positions or len(marker_positions) != len(cands):
-        cands = cands[:len(marker_positions)]
     if not marker_positions:
         return None, None
+    if len(marker_positions) != len(cands):
+        cands = cands[: len(marker_positions)]
 
     x = mx.array([input_ids], dtype=mx.int32)
     hidden = model.language_model.model(x)
-    marker_h = hidden[0, mx.array(marker_positions)].astype(mx.float32)
+
+    all_positions = [state_pos] + marker_positions
+    tokens = hidden[0, mx.array(all_positions)].astype(mx.float32)
 
     k = len(cands)
     mock_ex = [{"type": question.get("type"), "candidate_ids": cands, "leaf_tokens": [[1]] * k}]
-    logits, _ = head(marker_h, mock_ex, kmax=k)
+    logits, _ = head(tokens, mock_ex, kmax=k)
     mx.eval(logits)
     z = logits[0] if logits.ndim > 1 else logits
     z = z[:k] / max(1e-4, temperature)
@@ -312,13 +362,13 @@ def run_latency_benchmark(model, tokenizer, head):
 
 
 def load_scorer_head(head_path: Path, hidden_size: int = 1024):
-    """Load LinearScorerHead, ResidualCandidateSetHead, CandidateSetHead, or DeepDecisionHeads."""
+    """Load LinearScorerHead, StateGuidedCandidateSetHead, ResidualCandidateSetHead, or CandidateSetHead."""
     weights = load_file(str(head_path))
     if "base_w" in weights:
-        from mlx_residual_candidate_set_head import ResidualCandidateSetHead
-        head = ResidualCandidateSetHead(base_weight=mx.array(weights["base_w"]), in_dim=hidden_size)
+        from mlx_state_guided_head import StateGuidedCandidateSetHead
+        head = StateGuidedCandidateSetHead(base_weight=mx.array(weights["base_w"]), in_dim=hidden_size)
         head.load_weights([(k, mx.array(v)) for k, v in weights.items()], strict=False)
-        print(f"Loaded ResidualCandidateSetHead from: {head_path}", flush=True)
+        print(f"Loaded StateGuidedCandidateSetHead from: {head_path}", flush=True)
     elif "proj.weight" in weights and len(weights) == 1:
         head = LinearScorerHead(hidden_size=hidden_size)
         head.proj.weight = mx.array(weights["proj.weight"])
