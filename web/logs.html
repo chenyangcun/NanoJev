@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NanoJev-4B 生产监控与实时请求日志</title>
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --card-bg: #151d30;
+      --card-border: #23304d;
+      --text-main: #f1f5f9;
+      --text-muted: #94a3b8;
+      --text-sub: #64748b;
+      --accent: #38bdf8;
+      --accent-glow: rgba(56, 189, 248, 0.15);
+      --green: #22c55e;
+      --green-bg: rgba(34, 197, 94, 0.12);
+      --yellow: #eab308;
+      --yellow-bg: rgba(234, 179, 8, 0.12);
+      --red: #ef4444;
+      --red-bg: rgba(239, 68, 68, 0.12);
+      --purple: #a855f7;
+      --purple-bg: rgba(168, 85, 247, 0.12);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background-color: var(--bg);
+      color: var(--text-main);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", monospace;
+      padding: 24px;
+      line-height: 1.5;
+    }
+    .container { max-width: 1440px; margin: 0 auto; }
+    
+    /* Header */
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--card-border);
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+    .header-left h1 {
+      font-size: 24px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .header-left p {
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+    .badge-h2c {
+      background: rgba(56, 189, 248, 0.15);
+      color: var(--accent);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      padding: 2px 8px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .live-status {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      color: var(--green);
+      background: var(--green-bg);
+      padding: 6px 12px;
+      border-radius: 20px;
+      border: 1px solid rgba(34, 197, 94, 0.2);
+    }
+    .pulse-dot {
+      width: 8px;
+      height: 8px;
+      background: var(--green);
+      border-radius: 50%;
+      box-shadow: 0 0 8px var(--green);
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(1.2); }
+    }
+    button, select {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      color: var(--text-main);
+      padding: 7px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    button:hover, select:hover {
+      border-color: var(--accent);
+      background: rgba(56, 189, 248, 0.08);
+    }
+
+    /* KPI Cards */
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .kpi-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 18px;
+      position: relative;
+      overflow: hidden;
+    }
+    .kpi-card::before {
+      content: "";
+      position: absolute;
+      top: 0; left: 0; right: 0; height: 2px;
+      background: linear-gradient(90deg, transparent, var(--accent), transparent);
+      opacity: 0.4;
+    }
+    .kpi-title {
+      font-size: 12px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .kpi-value {
+      font-size: 26px;
+      font-weight: 700;
+      margin-top: 8px;
+      letter-spacing: -0.5px;
+    }
+    .kpi-sub {
+      font-size: 12px;
+      color: var(--text-sub);
+      margin-top: 4px;
+    }
+
+    /* Filter Toolbar */
+    .toolbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .filter-group {
+      display: flex;
+      gap: 8px;
+    }
+    .filter-btn {
+      padding: 6px 14px;
+      font-size: 13px;
+      border-radius: 8px;
+      border: 1px solid var(--card-border);
+      background: var(--card-bg);
+      color: var(--text-muted);
+    }
+    .filter-btn.active {
+      background: var(--accent);
+      color: #0b0f19;
+      font-weight: 600;
+      border-color: var(--accent);
+    }
+    .search-box input {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      color: var(--text-main);
+      padding: 7px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      width: 260px;
+    }
+    .search-box input:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    /* Table Container */
+    .table-container {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      overflow-x: auto;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+      font-size: 13px;
+    }
+    thead {
+      background: rgba(11, 15, 25, 0.6);
+      border-bottom: 1px solid var(--card-border);
+    }
+    th {
+      padding: 12px 16px;
+      color: var(--text-muted);
+      font-weight: 600;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    tbody tr {
+      border-bottom: 1px solid rgba(35, 48, 77, 0.4);
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    tbody tr:hover {
+      background: rgba(56, 189, 248, 0.04);
+    }
+    td {
+      padding: 12px 16px;
+      vertical-align: middle;
+    }
+
+    /* Badges */
+    .status-badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 6px;
+      font-weight: 600;
+      font-size: 12px;
+    }
+    .status-200 { background: var(--green-bg); color: var(--green); border: 1px solid rgba(34,197,94,0.3); }
+    .status-505 { background: var(--yellow-bg); color: var(--yellow); border: 1px solid rgba(234,179,8,0.3); }
+    .status-error { background: var(--red-bg); color: var(--red); border: 1px solid rgba(239,68,68,0.3); }
+
+    .hit-badge {
+      padding: 3px 8px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 700;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .hit-yes { background: var(--green-bg); color: var(--green); border: 1px solid rgba(34,197,94,0.3); }
+    .hit-no { background: rgba(148, 163, 184, 0.1); color: var(--text-muted); border: 1px solid var(--card-border); }
+
+    .lat-fast { color: var(--green); font-weight: 600; }
+    .lat-med { color: var(--yellow); font-weight: 600; }
+    .lat-slow { color: var(--red); font-weight: 600; }
+
+    .decision-tag {
+      background: rgba(56, 189, 248, 0.08);
+      color: #7dd3fc;
+      border: 1px solid rgba(56, 189, 248, 0.2);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 11px;
+      display: inline-block;
+      margin: 2px 4px 2px 0;
+    }
+    .decision-key { color: var(--text-muted); margin-right: 3px; }
+
+    /* Modal Drawer */
+    .drawer-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.6);
+      backdrop-filter: blur(4px);
+      display: none;
+      justify-content: flex-end;
+      z-index: 999;
+    }
+    .drawer {
+      background: var(--card-bg);
+      width: 650px;
+      max-width: 90vw;
+      height: 100%;
+      border-left: 1px solid var(--card-border);
+      padding: 24px;
+      overflow-y: auto;
+      box-shadow: -10px 0 30px rgba(0,0,0,0.5);
+    }
+    .drawer-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+      padding-bottom: 14px;
+      border-bottom: 1px solid var(--card-border);
+    }
+    .drawer-close {
+      background: transparent;
+      border: none;
+      font-size: 20px;
+      color: var(--text-muted);
+    }
+    .section-title {
+      font-size: 13px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      margin: 16px 0 8px 0;
+      letter-spacing: 0.5px;
+    }
+    pre {
+      background: #0b0f19;
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 12px;
+      color: #cbd5e1;
+      overflow-x: auto;
+      max-height: 240px;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="header-left">
+        <h1>NanoJev-4B 决策引擎监控 <span class="badge-h2c">h2c-only</span></h1>
+        <p>Qwen3.5-4B oQ4e-FP16 (2.3GB) Metal GPU + MPS Vision • 端口 8770 • TypeSafe /v1/systemone 生产监控</p>
+      </div>
+      <div class="header-right">
+        <div class="live-status">
+          <div class="pulse-dot"></div>
+          <span id="conn-status">服务在线 (H2/HTTP2)</span>
+        </div>
+        <select id="refresh-interval">
+          <option value="2000" selected>自动刷新 (2s)</option>
+          <option value="5000">自动刷新 (5s)</option>
+          <option value="0">停止刷新</option>
+        </select>
+        <button id="btn-refresh">刷新 ↺</button>
+      </div>
+    </header>
+
+    <!-- KPI Metrics -->
+    <div class="kpi-grid">
+      <div class="kpi-card">
+        <div class="kpi-title">总请求量 (Requests) <span>📊</span></div>
+        <div class="kpi-value" id="kpi-total">-</div>
+        <div class="kpi-sub" id="kpi-uptime">已平稳运行 -</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-title">KV 缓存命中率 (Cache Hit) <span>⚡</span></div>
+        <div class="kpi-value" style="color: var(--green);" id="kpi-hit-rate">-%</div>
+        <div class="kpi-sub" id="kpi-hit-count">命中 - 次</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-title">中位延迟 P50 (Median) <span>⏱️</span></div>
+        <div class="kpi-value" id="kpi-p50">- ms</div>
+        <div class="kpi-sub">端到端完整请求</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-title">长尾延迟 P95 (Tail) <span>🚀</span></div>
+        <div class="kpi-value" id="kpi-p95">- ms</div>
+        <div class="kpi-sub" id="kpi-avg">平均 - ms</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-title">平均请求体大小 (Request Size) <span>📦</span></div>
+        <div class="kpi-value" id="kpi-size">- KB</div>
+        <div class="kpi-sub">JSON Payload 体积</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-title">LRU KV 缓存槽位 (Slots) <span>🧠</span></div>
+        <div class="kpi-value" id="kpi-slots">- / 8</div>
+        <div class="kpi-sub">多会话前缀共享池</div>
+      </div>
+    </div>
+
+    <!-- Filter & Search Toolbar -->
+    <div class="toolbar">
+      <div class="filter-group">
+        <button class="filter-btn active" data-filter="all">全部请求</button>
+        <button class="filter-btn" data-filter="hit">🟢 缓存命中 (Hits)</button>
+        <button class="filter-btn" data-filter="miss">⚪ 冷 Prefill (Miss)</button>
+        <button class="filter-btn" data-filter="error">🔴 异常错误</button>
+      </div>
+      <div class="search-box">
+        <input type="text" id="search-input" placeholder="搜索问题、决策结果或路径...">
+      </div>
+    </div>
+
+    <!-- Log Table -->
+    <div class="table-container">
+      <table>
+        <thead>
+          <tr>
+            <th>时间</th>
+            <th>接口 / 协议</th>
+            <th>状态</th>
+            <th>请求大小</th>
+            <th>总耗时 (ms)</th>
+            <th>推理耗时</th>
+            <th>KV 缓存</th>
+            <th>决策结果 (Decisions)</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="log-tbody">
+          <tr><td colspan="9" style="text-align: center; color: var(--text-muted); padding: 32px;">正在加载实时数据...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Detail Drawer -->
+  <div class="drawer-overlay" id="drawer-overlay">
+    <div class="drawer">
+      <div class="drawer-header">
+        <h2 style="font-size: 18px;" id="drawer-title">请求详情</h2>
+        <button class="drawer-close" id="drawer-close">✕</button>
+      </div>
+
+      <div class="section-title">⏱️ 耗时与上下文指标</div>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 13px; margin-bottom: 12px;">
+        <div>总耗时: <b id="detail-total-ms">-</b> ms</div>
+        <div>模型纯推理: <b id="detail-infer-ms">-</b> ms</div>
+        <div>输入有效 Tokens: <b id="detail-tokens">-</b></div>
+        <div>缓存状态: <span id="detail-cache-badge">-</span></div>
+      </div>
+
+      <div class="section-title">🎯 决策输出 (Decisions)</div>
+      <div id="detail-decisions" style="margin-bottom: 12px;"></div>
+
+      <div class="section-title">📝 证据上下文预览 (Evidence Preview)</div>
+      <pre id="detail-evidence"></pre>
+
+      <div class="section-title">📦 原始元数据 (Raw Log Entry)</div>
+      <pre id="detail-raw"></pre>
+    </div>
+  </div>
+
+  <script>
+    let currentFilter = 'all';
+    let logsData = [];
+    let refreshTimer = null;
+
+    function formatBytes(bytes) {
+      if (!bytes || bytes === 0) return '0 B';
+      const k = 1024;
+      if (bytes < k) return bytes + ' B';
+      return (bytes / k).toFixed(1) + ' KB';
+    }
+
+    function formatTime(seconds) {
+      const h = Math.floor(seconds / 3600);
+      const m = Math.floor((seconds % 3600) / 60);
+      if (h > 0) return `${h}h ${m}m`;
+      return `${m}m ${Math.floor(seconds % 60)}s`;
+    }
+
+    async function fetchLogs() {
+      try {
+        const search = document.getElementById('search-input').value.trim();
+        let url = `/api/logs?limit=100`;
+        if (currentFilter !== 'all') url += `&filter=${currentFilter}`;
+        if (search) url += `&search=${encodeURIComponent(search)}`;
+
+        const res = await fetch(url);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        renderKPIs(data.stats);
+        renderTable(data.logs);
+        logsData = data.logs;
+      } catch (err) {
+        document.getElementById('conn-status').innerText = '连接异常 (重试中...)';
+        document.getElementById('conn-status').parentElement.style.color = '#ef4444';
+      }
+    }
+
+    function renderKPIs(s) {
+      if (!s) return;
+      document.getElementById('kpi-total').innerText = s.total_requests.toLocaleString();
+      document.getElementById('kpi-uptime').innerText = `已连续平稳服务 ${formatTime(s.uptime_seconds)}`;
+      document.getElementById('kpi-hit-rate').innerText = (s.cache_hit_rate * 100).toFixed(1) + '%';
+      document.getElementById('kpi-hit-count').innerText = `已累计命中 ${s.cache_hits} 次前缀`;
+      document.getElementById('kpi-p50').innerText = s.p50_latency_ms.toFixed(0) + ' ms';
+      document.getElementById('kpi-p95').innerText = s.p95_latency_ms.toFixed(0) + ' ms';
+      document.getElementById('kpi-avg').innerText = `平均 ${s.avg_latency_ms.toFixed(0)} ms`;
+      document.getElementById('kpi-size').innerText = formatBytes(s.avg_request_size_bytes);
+      document.getElementById('kpi-slots').innerText = `${s.lru_slots_used} / ${s.lru_capacity}`;
+      document.getElementById('conn-status').innerText = '服务在线 (H2/HTTP2)';
+      document.getElementById('conn-status').parentElement.style.color = '#22c55e';
+    }
+
+    function renderTable(logs) {
+      const tbody = document.getElementById('log-tbody');
+      if (!logs || logs.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="9" style="text-align: center; color: var(--text-muted); padding: 32px;">暂无匹配日志记录</td></tr>`;
+        return;
+      }
+
+      let html = '';
+      logs.forEach((log, idx) => {
+        const is200 = log.status === 200;
+        const statusClass = is200 ? 'status-200' : (log.status === 505 ? 'status-505' : 'status-error');
+        
+        // Latency colors
+        let latClass = 'lat-fast';
+        if (log.total_ms > 1400) latClass = 'lat-slow';
+        else if (log.total_ms > 600) latClass = 'lat-med';
+
+        // Decisions badges
+        let decHtml = '';
+        if (log.decisions) {
+          for (let [k, v] of Object.entries(log.decisions)) {
+            decHtml += `<span class="decision-tag"><span class="decision-key">${k}:</span><b>${v}</b></span>`;
+          }
+        } else if (log.error) {
+          decHtml = `<span style="color: var(--red);">${log.error}</span>`;
+        }
+
+        const hitHtml = log.cache_hit 
+          ? `<span class="hit-badge hit-yes">● HIT</span>` 
+          : `<span class="hit-badge hit-no">○ MISS</span>`;
+
+        html += `
+          <tr onclick="inspectLog(${idx})">
+            <td style="color: var(--text-muted); font-family: monospace;">${log.time_str || '-'}</td>
+            <td><b>${log.path}</b> <span style="font-size: 11px; color: var(--text-sub);">(h${log.http_version})</span></td>
+            <td><span class="status-badge ${statusClass}">${log.status}</span></td>
+            <td>${formatBytes(log.request_bytes)}</td>
+            <td class="${latClass}">${log.total_ms} ms</td>
+            <td style="color: var(--text-muted);">${log.infer_ms} ms</td>
+            <td>${hitHtml}</td>
+            <td>${decHtml}</td>
+            <td><button onclick="event.stopPropagation(); inspectLog(${idx})" style="padding: 2px 8px; font-size: 11px;">详情</button></td>
+          </tr>
+        `;
+      });
+      tbody.innerHTML = html;
+    }
+
+    function inspectLog(idx) {
+      const log = logsData[idx];
+      if (!log) return;
+      document.getElementById('drawer-title').innerText = `请求详情 #${log.id} (${log.time_str})`;
+      document.getElementById('detail-total-ms').innerText = log.total_ms;
+      document.getElementById('detail-infer-ms').innerText = log.infer_ms;
+      document.getElementById('detail-tokens').innerText = log.prefill_tokens || 0;
+      document.getElementById('detail-cache-badge').innerHTML = log.cache_hit 
+        ? `<span class="hit-badge hit-yes">● LRU KV CACHE HIT (已复用前缀)</span>` 
+        : `<span class="hit-badge hit-no">○ COLD PREFILL (全量前缀重算)</span>`;
+
+      // Render decisions
+      let dHtml = '';
+      if (log.decisions) {
+        for (let [k, v] of Object.entries(log.decisions)) {
+          const conf = log.confidences ? (log.confidences[k] * 100).toFixed(1) + '%' : '';
+          dHtml += `<div style="display: flex; justify-content: space-between; padding: 6px 10px; background: rgba(56,189,248,0.06); border-radius: 6px; margin-bottom: 6px; font-size: 13px;">
+            <span><b>${k}</b>: <span style="color: #38bdf8;">${v}</span></span>
+            <span style="color: var(--text-muted);">${conf ? '置信度: ' + conf : ''}</span>
+          </div>`;
+        }
+      }
+      document.getElementById('detail-decisions').innerHTML = dHtml || '<div style="color: var(--text-muted);">无决策输出</div>';
+      document.getElementById('detail-evidence').innerText = log.state_preview || '无 Evidence 上下文';
+      document.getElementById('detail-raw').innerText = JSON.stringify(log, null, 2);
+
+      document.getElementById('drawer-overlay').style.display = 'flex';
+    }
+
+    // Event Listeners
+    document.getElementById('drawer-close').onclick = () => {
+      document.getElementById('drawer-overlay').style.display = 'none';
+    };
+    document.getElementById('drawer-overlay').onclick = (e) => {
+      if (e.target === document.getElementById('drawer-overlay')) {
+        document.getElementById('drawer-overlay').style.display = 'none';
+      }
+    };
+
+    // Filter Buttons
+    document.querySelectorAll('.filter-btn').forEach(btn => {
+      btn.onclick = () => {
+        document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        currentFilter = btn.dataset.filter;
+        fetchLogs();
+      };
+    });
+
+    document.getElementById('search-input').oninput = () => {
+      fetchLogs();
+    };
+
+    document.getElementById('btn-refresh').onclick = () => {
+      fetchLogs();
+    };
+
+    function setupRefresh() {
+      if (refreshTimer) clearInterval(refreshTimer);
+      const val = parseInt(document.getElementById('refresh-interval').value);
+      if (val > 0) {
+        refreshTimer = setInterval(fetchLogs, val);
+      }
+    }
+    document.getElementById('refresh-interval').onchange = setupRefresh;
+
+    // Initial load
+    fetchLogs();
+    setupRefresh();
+  </script>
+</body>
+</html>
