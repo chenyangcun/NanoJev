@@ -32,6 +32,19 @@ class NanoJev4BPredictor:
         self.model, self.tokenizer = load(checkpoint_dir, tokenizer_config={"trust_remote_code": False})
         print(f"Model loaded in {time.time()-t0:.2f}s!", flush=True)
 
+        # Initialize Multimodal Vision Engine (Apple MPS Qwen3.5)
+        nj_scripts = os.path.expanduser("~/work/NanoJev/scripts")
+        if nj_scripts not in sys.path:
+            sys.path.insert(0, nj_scripts)
+        try:
+            from vision_decision_engine import VisionDecisionEngine
+            vision_ckpt = os.path.expanduser("~/work/NanoJev/checkpoints/dohnuts_merged_0.8b")
+            self.vision_engine = VisionDecisionEngine(checkpoint_dir=vision_ckpt)
+            print("Multimodal Vision Decision Engine ready on Apple MPS!", flush=True)
+        except Exception as e:
+            print(f"Vision Decision Engine not loaded ({e}); continuing with pure-text lanes.", flush=True)
+            self.vision_engine = None
+
     def predict_question(self, state: str, qid: str, q: dict, temperature: float = 1.0) -> dict:
         qtype = q.get("type", "choice")
         crit = q.get("criteria")
@@ -129,8 +142,9 @@ def make_handler(predictor: NanoJev4BPredictor, default_temp: float = 1.0):
                 self.send_json(200, {
                     "ready": True,
                     "model": "nanojev-4b",
-                    "engine": "qwen35-4b-mlx",
-                    "architecture": "Qwen3.5-4B 8-bit Metal GPU",
+                    "engine": "nanojev-4b-hybrid",
+                    "architecture": "Qwen3.5-4B 8-bit Metal GPU + Multimodal Vision MPS",
+                    "vision_available": predictor.vision_engine is not None,
                     "status": "healthy"
                 })
             else:
@@ -157,6 +171,19 @@ def make_handler(predictor: NanoJev4BPredictor, default_temp: float = 1.0):
             state = payload.get("state", "")
             raw_questions = payload.get("questions", {})
             temp = float(payload.get("temperature", default_temp))
+
+            # Multimodal Vision Lane: if state contains an image, route to VisionDecisionEngine
+            if predictor.vision_engine and predictor.vision_engine.has_image(state):
+                try:
+                    from typesafe_adapter import typesafe_request_to_nanojev, nanojev_response_to_typesafe
+                    nj_payload, meta = typesafe_request_to_nanojev(payload)
+                    nj_res = predictor.vision_engine.predict(nj_payload, temperature=temp)
+                    resp = nanojev_response_to_typesafe(nj_res, meta)
+                    self.send_json(200, resp)
+                    return
+                except Exception as exc:
+                    self.send_json(500, {"error": f"Vision inference error: {exc}"})
+                    return
 
             answers = {}
             total_tokens = 0

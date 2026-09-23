@@ -35,6 +35,16 @@ def build_semif_row(task):
     }
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint-dir", default="checkpoints/qwen35_4b_8bit")
+    parser.add_argument("--cache-file", default=None)
+    args = parser.parse_args()
+
+    checkpoint_dir = args.checkpoint_dir
+    default_cache = os.path.join(os.path.dirname(__file__), "..", "results", f"eval_cache_{Path(checkpoint_dir).name}.jsonl")
+    cache_file = args.cache_file or default_cache
+
     jb_path = os.path.expanduser("~/work/NanoJev/data/jevbench_v130")
     if os.path.exists(jb_path):
         sys.path.insert(0, jb_path)
@@ -43,12 +53,12 @@ def main():
     from jevbench import composite_v13 as score
 
     print("=" * 75)
-    print("EVALUATING QWEN3.5-4B (8-bit MLX) ON JEVBENCH v1.3.0 (SEMIF DIRECT MODE)")
+    print(f"EVALUATING {checkpoint_dir} ON JEVBENCH v1.3.0")
     print("=" * 75)
 
-    print("Loading Qwen3.5-4B 8-bit model...", flush=True)
+    print(f"Loading model from {checkpoint_dir} ...", flush=True)
     t0 = time.time()
-    model, tokenizer = load("checkpoints/qwen35_4b_8bit", tokenizer_config={"trust_remote_code": False})
+    model, tokenizer = load(checkpoint_dir, tokenizer_config={"trust_remote_code": False})
     print(f"Model loaded in {time.time()-t0:.2f}s!\n", flush=True)
 
     easy = load_jsonl(os.path.join(jb_path, "datasets/public/easy.jsonl"))
@@ -89,7 +99,6 @@ def main():
 
     # Run forward passes once to get logits
     print("Running forward passes on Apple Metal GPU...", flush=True)
-    cache_file = "/tmp/eval_4b_semif_cache.jsonl"
     cached_logits = {}
     if os.path.exists(cache_file):
         with open(cache_file) as f:
@@ -133,8 +142,8 @@ def main():
 
         raw_logits_records.append((task, row, selected, len(input_ids), lat))
 
-        if (idx + 1) % 25 == 0 or idx + 1 == len(encoded_items):
-            print(f"  Processed {idx + 1:3d} / {len(encoded_items)} in {time.time()-t_start:.1f}s (latest lat: {lat*1000:.1f}ms)", flush=True)
+        if (idx + 1) % 10 == 0 or idx + 1 == len(encoded_items) or lat > 1.0:
+            print(f"  Processed {idx + 1:3d} / {len(encoded_items)}: {task.id:<30} ({len(input_ids):4d} tok, {lat*1000:6.1f}ms) in {time.time()-t_start:.1f}s", flush=True)
 
     cache_fh.close()
     print(f"\nAll {len(encoded_items)} forward passes complete in {time.time()-t_start:.1f}s!")
